@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-IME Stats —— 输入统计托盘程序
+IME Stats —— 输入统计托盘程序 v0.6
 ================================
 功能：
   1. 全局统计按键次数（被动低级钩子，对游戏无干扰）
-  2. 读取 Rime 上屏日志（commit_log.txt）统计中文字数
+  2. 读取 Rime 上屏日志（commit_log.txt）统计中文字数 / 常用词
   3. 英文模式下统计英文字符数 / 单词数
-  4. 系统托盘图标 + 点击弹出统计面板（今日 / 累计 / 最近7天）
-  5. 数据存 SQLite（stats.db），所有数据仅保存在本机
+  4. 托盘面板实时刷新：指标卡片、14天趋势、今日时段分布、常用词Top10
+  5. 每周一自动生成上周输入周报（docs/reports/*.md）
+  6. 数据存 SQLite（stats.db），所有数据仅保存在本机
 
 依赖：pip install -r requirements.txt
 运行：pythonw ime_stats.py   （pythonw 无黑窗口）
@@ -29,11 +30,11 @@ from pynput import keyboard
 import pystray
 from PIL import Image, ImageDraw
 import tkinter as tk
-from tkinter import ttk
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(APP_DIR, "stats.db")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+REPORTS_DIR = os.path.join(os.path.dirname(APP_DIR), "docs", "reports")
 RIME_USER_DIR = os.path.join(os.environ.get("APPDATA", ""), "Rime")
 COMMIT_LOG = os.path.join(RIME_USER_DIR, "commit_log.txt")
 
@@ -101,6 +102,12 @@ class Store:
             cn_chars INTEGER DEFAULT 0,
             en_chars INTEGER DEFAULT 0,
             en_words INTEGER DEFAULT 0)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS hourly(
+            date TEXT, hour INTEGER,
+            keys INTEGER DEFAULT 0, cn_chars INTEGER DEFAULT 0,
+            PRIMARY KEY(date, hour))""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS word_freq(
+            word TEXT PRIMARY KEY, count INTEGER DEFAULT 0)""")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS meta(
             k TEXT PRIMARY KEY, v TEXT)""")
         self.conn.commit()
@@ -116,6 +123,28 @@ class Store:
                      en_chars=en_chars+excluded.en_chars,
                      en_words=en_words+excluded.en_words""",
                 (date, keys, cn, ec, ew))
+            self.conn.commit()
+
+    def add_hourly(self, date, hour, keys=0, cn=0):
+        with self.lock:
+            self.conn.execute(
+                """INSERT INTO hourly(date, hour, keys, cn_chars)
+                   VALUES(?,?,?,?)
+                   ON CONFLICT(date, hour) DO UPDATE SET
+                     keys=keys+excluded.keys,
+                     cn_chars=cn_chars+excluded.cn_chars""",
+                (date, hour, keys, cn))
+            self.conn.commit()
+
+    def add_words(self, counts):
+        if not counts:
+            return
+        with self.lock:
+            self.conn.executemany(
+                """INSERT INTO word_freq(word, count) VALUES(?,?)
+                   ON CONFLICT(word) DO UPDATE SET
+                     count=count+excluded.count""",
+                list(counts.items()))
             self.conn.commit()
 
     def get_meta(self, k, default="0"):
@@ -155,6 +184,26 @@ class Store:
                 "ORDER BY date DESC LIMIT ?", (n,)).fetchall()
         return rows[::-1]
 
+    def today_hours(self):
+        """今日 24 小时按键分布，返回 {hour: keys}"""
+        d = datetime.date.today().isoformat()
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT hour,keys FROM hourly WHERE date=?", (d,)).fetchall()
+        return dict(rows)
+
+    def top_words(self, n=10):
+        with self.lock:
+            return self.conn.execute(
+                "SELECT word,count FROM word_freq "
+                "ORDER BY count DESC LIMIT ?", (n,)).fetchall()
+
+    def range_days(self, d1, d2):
+        with self.lock:
+            return self.conn.execute(
+                "SELECT date,keys,cn_chars,en_words FROM daily "
+                "WHERE date BETWEEN ? AND ? ORDER BY date", (d1, d2)).fetchall()
+
 
 # ---------------- 按键统计 ----------------
 class KeyCounter:
@@ -169,6 +218,7 @@ class KeyCounter:
         self.en_chars = 0
         self.en_words = 0
         self.letter_run = 0
+        self.hour_acc = {}               # (date, hour) -> keys
         self.lock = threading.Lock()
         self.events = queue.Queue()
         self._mode_cache = (0.0, None)   # (时间, 是否中文)
@@ -211,8 +261,11 @@ class KeyCounter:
             try:
                 if self._cached_proc() in self.config["skip_processes"]:
                     continue
+                now = datetime.datetime.now()
+                hkey = (now.date().isoformat(), now.hour)
                 with self.lock:
                     self.keys += 1
+                    self.hour_acc[hkey] = self.hour_acc.get(hkey, 0) + 1
                     if ch and ch.isalpha() and ch.isascii():
                         # 中文模式下字母是拼音编码，不计入英文；
                         # 检测失败时按英文计（说明见文档）
@@ -228,10 +281,14 @@ class KeyCounter:
     def flush(self):
         with self.lock:
             k, ec, ew = self.keys, self.en_chars, self.en_words
+            hours = dict(self.hour_acc)
             self.keys = self.en_chars = self.en_words = 0
+            self.hour_acc.clear()
         if k or ec or ew:
             self.store.add(datetime.date.today().isoformat(),
                            keys=k, ec=ec, ew=ew)
+        for (d, h), n in hours.items():
+            self.store.add_hourly(d, h, keys=n)
 
     def snapshot(self):
         """未落盘的实时增量（供面板实时显示，不清零）"""
@@ -258,17 +315,83 @@ class CommitLogReader:
             self.offset = 0
         if size == self.offset:
             return
-        cn = 0
+        day_cn, hour_cn, words = {}, {}, {}
         with open(COMMIT_LOG, "r", encoding="utf-8", errors="ignore") as f:
             f.seek(self.offset)
             for line in f:
                 parts = line.rstrip("\n").split("\t", 1)
-                if len(parts) == 2:
-                    cn += sum(1 for c in parts[1] if is_cjk(c))
+                if len(parts) != 2:
+                    continue
+                ts, text = parts
+                cn = sum(1 for c in text if is_cjk(c))
+                if cn:
+                    try:                # 按日志自身时间归账，跨天也准确
+                        d, h = ts[:10], int(ts[11:13])
+                    except ValueError:
+                        d, h = datetime.date.today().isoformat(), 0
+                    day_cn[d] = day_cn.get(d, 0) + cn
+                    hour_cn[(d, h)] = hour_cn.get((d, h), 0) + cn
+                # 常用词：2~6 个纯汉字的整体上屏才算一个"词"
+                if 2 <= len(text) <= 6 and cn == len(text):
+                    words[text] = words.get(text, 0) + 1
             self.offset = f.tell()
-        if cn:
-            self.store.add(datetime.date.today().isoformat(), cn=cn)
+        for d, cn in day_cn.items():
+            self.store.add(d, cn=cn)
+        for (d, h), cn in hour_cn.items():
+            self.store.add_hourly(d, h, cn=cn)
+        self.store.add_words(words)
         self.store.set_meta("commit_log_offset", self.offset)
+
+
+# ---------------- 周报生成 ----------------
+def maybe_weekly_report(store):
+    """启动时检查：上一个自然周（周一~周日）的周报没生成过就补一份"""
+    try:
+        today = datetime.date.today()
+        last_mon = today - datetime.timedelta(days=today.weekday() + 7)
+        last_sun = last_mon + datetime.timedelta(days=6)
+        iso = last_mon.isocalendar()
+        tag = f"{iso[0]}-W{iso[1]:02d}"
+        if store.get_meta("weekly_report_last", "") == tag:
+            return
+        rows = store.range_days(last_mon.isoformat(), last_sun.isoformat())
+        store.set_meta("weekly_report_last", tag)
+        if not rows:
+            return                      # 上周无数据，不生成
+        prev_mon = last_mon - datetime.timedelta(days=7)
+        prev = store.range_days(prev_mon.isoformat(),
+                                (last_mon - datetime.timedelta(days=1)).isoformat())
+        tk_ = sum(r[1] for r in rows)
+        tcn = sum(r[2] for r in rows)
+        tew = sum(r[3] for r in rows)
+        pk = sum(r[1] for r in prev)
+
+        def pct(cur, old):
+            if not old:
+                return "—"
+            return f"{(cur - old) / old * 100:+.0f}%"
+
+        lines = [
+            f"# 输入周报 {tag}（{last_mon} ~ {last_sun}）",
+            "",
+            f"按键 **{tk_:,}** 次（环比上周 {pct(tk_, pk)}）；"
+            f"中文 **{tcn:,}** 字；英文 **{tew:,}** 词。",
+            "",
+            "| 日期 | 按键 | 中文字 | 英文词 |",
+            "|------|------|--------|--------|",
+        ]
+        for d, k, cn, ew in rows:
+            lines.append(f"| {d} | {k:,} | {cn:,} | {ew:,} |")
+        top = store.top_words(10)
+        if top:
+            lines += ["", "本周为止的常用词：" +
+                      "、".join(f"{w}({c})" for w, c in top)]
+        os.makedirs(REPORTS_DIR, exist_ok=True)
+        path = os.path.join(REPORTS_DIR, f"输入周报-{tag}.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception:
+        pass
 
 
 # ---------------- 托盘 + 面板 ----------------
@@ -384,6 +507,15 @@ class App:
             tk.Label(card, textvariable=av, font=("微软雅黑", 9),
                      bg=self.CARD, fg=self.SUB).pack()
 
+        # 今日时段分布
+        tk.Label(wrap, text="今日 · 时段分布（按键）", font=("微软雅黑", 9),
+                 bg=self.BG, fg=self.SUB, anchor="w").pack(fill="x",
+                                                           pady=(14, 3))
+        self._hours_cv = tk.Canvas(wrap, width=560, height=90, bg=self.CARD,
+                                   highlightthickness=0)
+        self._hours_cv.pack()
+        self._hours_cache = None
+
         # 最近 14 天柱状图（按键 / 中文）
         self._charts = []
         for title, color, idx in (("最近 14 天 · 按键次数", "#A9B8D6", 1),
@@ -395,6 +527,15 @@ class App:
             cv.pack()
             self._charts.append((cv, idx, color))
         self._chart_cache = None
+
+        # 常用词 Top 10
+        tk.Label(wrap, text="常用词 Top 10", font=("微软雅黑", 9),
+                 bg=self.BG, fg=self.SUB, anchor="w").pack(fill="x",
+                                                           pady=(14, 3))
+        self._words_var = tk.StringVar()
+        tk.Label(wrap, textvariable=self._words_var, font=("微软雅黑", 10),
+                 bg=self.CARD, fg=self.FG, justify="left", anchor="w",
+                 padx=14, pady=10, width=64, wraplength=540).pack(fill="x")
 
         def refresh():
             if not p.winfo_exists():
@@ -408,6 +549,12 @@ class App:
             for i, (today_v, total_v) in enumerate(pairs):
                 self._today_vars[i].set(f"{today_v:,}")
                 self._total_vars[i].set(f"累计 {total_v:,}")
+
+            hours = self.store.today_hours()
+            if hours != self._hours_cache:
+                self._hours_cache = hours
+                self._draw_hours(self._hours_cv, hours)
+
             rows = self.store.last_n(14)
             if rows:    # 今日实时增量并入最后一根柱子
                 d, k, cn, ew = rows[-1]
@@ -417,6 +564,10 @@ class App:
                 self._chart_cache = rows
                 for cv, idx, color in self._charts:
                     self._draw_chart(cv, rows, idx, color)
+
+            self._words_var.set("　".join(
+                f"{i+1}.{w} ×{c}" for i, (w, c) in
+                enumerate(self.store.top_words(10))) or "还没有数据，去打几个字吧")
             p.after(1000, refresh)
 
         refresh()
@@ -442,6 +593,24 @@ class App:
                                font=("微软雅黑", 8), fill=self.SUB)
             cv.create_text((x0 + x1) / 2, H - 8, text=r[0][5:],
                            font=("微软雅黑", 8), fill=self.SUB)
+
+    def _draw_hours(self, cv, hours):
+        cv.delete("all")
+        W, H = int(cv["width"]), int(cv["height"])
+        pad, base = 10, H - 16
+        vmax = max(hours.values()) if hours else 1
+        bw = (W - 2 * pad) / 24
+        for h in range(24):
+            v = hours.get(h, 0)
+            x0 = pad + h * bw + bw * 0.2
+            x1 = pad + (h + 1) * bw - bw * 0.2
+            if v:
+                bh = (base - 12) * v / vmax
+                cv.create_rectangle(x0, base - bh, x1, base,
+                                    fill="#E8A87C", width=0)
+            if h % 3 == 0:
+                cv.create_text((x0 + x1) / 2, H - 7, text=str(h),
+                               font=("微软雅黑", 8), fill=self.SUB)
 
     # ---- 主循环 ----
     def poll_queue(self):
@@ -469,6 +638,8 @@ class App:
     def run(self):
         self.counter.start()
         threading.Thread(target=self.flusher, daemon=True).start()
+        threading.Thread(target=maybe_weekly_report,
+                         args=(self.store,), daemon=True).start()
         self.build_tray()
         self.root.after(200, self.poll_queue)
         self.root.mainloop()
@@ -485,4 +656,4 @@ def ensure_single_instance():
 if __name__ == "__main__":
     ensure_single_instance()
     App().run()
-# v0.5
+# v0.6
