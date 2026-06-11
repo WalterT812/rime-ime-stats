@@ -231,14 +231,24 @@ class KeyCounter:
             self.store.add(datetime.date.today().isoformat(),
                            keys=k, ec=ec, ew=ew)
 
+    def snapshot(self):
+        """未落盘的实时增量（供面板实时显示，不清零）"""
+        with self.lock:
+            return self.keys, self.en_chars, self.en_words
+
 
 # ---------------- Rime 上屏日志读取 ----------------
 class CommitLogReader:
     def __init__(self, store):
         self.store = store
         self.offset = int(store.get_meta("commit_log_offset", "0"))
+        self.lock = threading.Lock()  # 面板线程与落盘线程可能并发调用 poll
 
     def poll(self):
+        with self.lock:
+            self._poll()
+
+    def _poll(self):
         if not os.path.exists(COMMIT_LOG):
             return
         size = os.path.getsize(COMMIT_LOG)
@@ -325,73 +335,48 @@ class App:
             ))
         self.tray.run_detached()
 
-    # ---- 统计面板 ----
+    # ---- 统计面板（每秒实时刷新） ----
     def show_panel(self):
-        self.counter.flush()
-        self.reader.poll()
         if self.panel and self.panel.winfo_exists():
-            self.panel.destroy()
+            self.panel.lift()
+            self.panel.focus_force()
+            return
         p = tk.Toplevel(self.root)
         self.panel = p
         p.title("输入统计")
         p.attributes("-topmost", True)
         p.resizable(False, False)
 
-        tk_, tcn, tec, tew = self.store.today()
-        ak, acn, aec, aew = self.store.total()
-
         frm = ttk.Frame(p, padding=16)
         frm.grid()
-        rows = [
-            ("", "按键次数", "中文字数", "英文字符", "英文单词"),
-            ("今日", tk_, tcn, tec, tew),
-            ("累计", ak, acn, aec, aew),
-        ]
-        for r, row in enumerate(rows):
-            for c, v in enumerate(row):
-                lbl = ttk.Label(frm, text=str(v),
-                                font=("微软雅黑", 11, "bold" if r == 0 or c == 0 else "normal"))
-                lbl.grid(row=r, column=c, padx=10, pady=4, sticky="e")
+        headers = ("", "按键次数", "中文字数", "英文字符", "英文单词")
+        for c, h in enumerate(headers):
+            ttk.Label(frm, text=h, font=("微软雅黑", 11, "bold")).grid(
+                row=0, column=c, padx=10, pady=4, sticky="e")
+
+        cells = {}  # (row, col) -> StringVar
+        for r, name in ((1, "今日"), (2, "累计")):
+            ttk.Label(frm, text=name, font=("微软雅黑", 11, "bold")).grid(
+                row=r, column=0, padx=10, pady=4, sticky="e")
+            for c in range(1, 5):
+                var = tk.StringVar(value="0")
+                cells[(r, c)] = var
+                ttk.Label(frm, textvariable=var, font=("微软雅黑", 11)).grid(
+                    row=r, column=c, padx=10, pady=4, sticky="e")
 
         ttk.Separator(frm, orient="horizontal").grid(
             row=3, column=0, columnspan=5, sticky="ew", pady=8)
         ttk.Label(frm, text="最近 7 天（日期 / 按键 / 中文 / 英文词）",
                   font=("微软雅黑", 9)).grid(row=4, column=0, columnspan=5)
-        for i, (d, k, cn, ew) in enumerate(self.store.last7()):
-            ttk.Label(frm, text=f"{d}    {k}    {cn}    {ew}",
-                      font=("Consolas", 10)).grid(
-                row=5 + i, column=0, columnspan=5, sticky="w", padx=10)
+        last7_var = tk.StringVar()
+        ttk.Label(frm, textvariable=last7_var, font=("Consolas", 10),
+                  justify="left").grid(row=5, column=0, columnspan=5,
+                                       sticky="w", padx=10)
 
-    # ---- 主循环 ----
-    def poll_queue(self):
-        try:
-            while True:
-                msg = self.ui_queue.get_nowait()
-                if msg == "panel":
-                    self.show_panel()
-                elif msg == "quit":
-                    self.shutdown()
-                    return
-        except queue.Empty:
-            pass
-        self.root.after(200, self.poll_queue)
-
-    def shutdown(self):
-        try:
-            self.counter.flush()
-            self.reader.poll()
-            self.counter.stop()
-            self.tray.stop()
-        finally:
-            self.root.destroy()
-
-    def run(self):
-        self.counter.start()
-        threading.Thread(target=self.flusher, daemon=True).start()
-        self.build_tray()
-        self.root.after(200, self.poll_queue)
-        self.root.mainloop()
-
-
-if __name__ == "__main__":
-    App().run()
+        def refresh():
+            if not p.winfo_exists():
+                return
+            self.reader.poll()                      # 实时拉取上屏日志 → 中文字数
+            lk, lec, lew = self.counter.snapshot()  # 未落盘的按键/英文增量
+            dk, dcn, dec, dew = self.store.today()
+            ak, acn, aec, 
