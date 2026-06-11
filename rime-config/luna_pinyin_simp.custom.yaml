@@ -1,0 +1,6 @@
+# 朙月拼音·简化字方案补丁：挂载上屏日志记录器 + 基础优化
+patch:
+  "engine/processors/@before 0": lua_processor@commit_logger
+  # 启用输入预测联想
+  translator/enable_sentence: true
+  translator/enable_user_dict: true

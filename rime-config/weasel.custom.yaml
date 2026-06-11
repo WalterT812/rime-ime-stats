@@ -1,0 +1,35 @@
+# 小狼毫（Weasel）前端设置补丁：界面外观 + 游戏兼容
+patch:
+  # ---------- 外观 ----------
+  style/color_scheme: dark_temple
+  style/font_face: "微软雅黑"
+  style/font_point: 13
+  style/horizontal: true          # 横排候选栏，类似微软拼音
+  style/inline_preedit: true      # 编码嵌入光标处，体验接近系统输入法
+
+  # ---------- 游戏兼容（核心） ----------
+  # app_options：对指定进程自动切换行为。
+  # ascii_mode: true  → 在该程序里启动时直接处于英文直通模式，
+  #                     按键不经过中文引擎，零延迟、不弹候选框，
+  #                     需要打中文时按左Shift临时切回即可。
+  # inline_preedit: false → 部分全屏游戏内嵌编码会渲染异常，改用独立小窗。
+  # 进程名一律小写。把你常玩的游戏 exe 名加进来即可。
+  app_options:
+    # --- 常见竞技/网游 ---
+    cs2.exe: { ascii_mode: true }
+    valorant.exe: { ascii_mode: true }
+    valorant-win64-shipping.exe: { ascii_mode: true }
+    "league of legends.exe": { ascii_mode: true, inline_preedit: false }
+    crossfire.exe: { ascii_mode: true }
+    dota2.exe: { ascii_mode: true }
+    r5apex.exe: { ascii_mode: true }            # Apex
+    # --- 米哈游系 ---
+    yuanshen.exe: { ascii_mode: true, inline_preedit: false }   # 原神
+    starrail.exe: { ascii_mode: true, inline_preedit: false }   # 星穹铁道
+    zenlesszonezero.exe: { ascii_mode: true, inline_preedit: false }
+    # --- 其他 ---
+    wuthering waves.exe: { ascii_mode: true, inline_preedit: false }
+    eldenring.exe: { ascii_mode: true }
+    # 终端/IDE 默认英文（可按需删除）
+    windowsterminal.exe: { ascii_mode: true }
+    openconsole.exe: { ascii_mode: true }

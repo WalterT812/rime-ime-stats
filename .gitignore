@@ -1,0 +1,4 @@
+vendor/
+stats-app/stats.db
+stats-app/__pycache__/
+*.bundle

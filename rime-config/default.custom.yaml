@@ -1,0 +1,26 @@
+# 全局设置补丁 —— 部署后生效（右键托盘小狼毫图标 → 重新部署）
+# 本文件会被部署脚本复制到 %APPDATA%\Rime\
+patch:
+  # 输入方案列表：首选雾凇拼音（需先运行 install_rime_ice.ps1 安装），
+  # 若未安装雾凇，可把 luna_pinyin_simp 移到第一位
+  schema_list:
+    - schema: rime_ice        # 雾凇拼音（推荐，词库智能度接近商业输入法）
+    - schema: luna_pinyin_simp # 朙月拼音·简化字（兜底）
+
+  # 候选词数量
+  menu/page_size: 7
+
+  # 中英文切换键：左 Shift 切换，右 Shift 仅临时
+  ascii_composer/switch_key:
+    Shift_L: commit_code   # 按左Shift：上屏已输入编码并切英文
+    Shift_R: commit_text
+    Caps_Lock: clear
+    Control_L: noop
+    Control_R: noop
+
+  # 默认半角、英文标点跟随中文模式
+  ascii_punct: false
+
+  # 方案切换菜单快捷键
+  switcher/hotkeys:
+    - "Control+grave"      # Ctrl+`
