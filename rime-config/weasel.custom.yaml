@@ -3,7 +3,7 @@ patch:
   # ---------- 外观：简白圆润主题 ----------
   # 字体：幼圆（圆体）优先，缺失时退到微软雅黑 Light（轻盈）再到雅黑
   style/font_face: "幼圆, 微软雅黑 Light, 微软雅黑"
-  style/font_point: 14
+  style/font_point: 12
   style/horizontal: true          # 横排候选栏，类似微软拼音
   style/inline_preedit: true      # 编码嵌入光标处，体验接近系统输入法
   style/label_format: "%s"        # 序号不带点，更清爽
