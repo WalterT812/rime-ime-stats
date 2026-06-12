@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IME Stats —— 输入统计托盘程序 v0.8
+IME Stats —— 输入统计托盘程序 v0.9
 ================================
 功能：
   1. 全局统计按键次数（被动低级钩子，对游戏无干扰）
@@ -8,16 +8,13 @@ IME Stats —— 输入统计托盘程序 v0.8
   3. 英文模式下统计英文字符数 / 单词数
   4. 托盘面板实时刷新：指标卡片、今日时段分布、14天趋势、常用词Top10
   5. 每周一自动生成上周输入周报（docs/reports/*.md）
-  6. 数据存 SQLite（stats.db），所有数据仅保存在本机
+  6. 数据存 SQLite（stats.db，WAL 模式），所有数据仅保存在本机
 
-v0.8 架构变化：
-  - jieba/pypinyin 移到独立进程 word_worker.py（每 6 小时或托盘手动触发，
-    跑完即退），常驻内存降回 ~40MB；高频词自动写入 Rime custom_phrase
-  - commit_log.txt 超过 2MB 且完全消化后自动归档轮转
-  - 配合 enable_autostart.bat 注册的每小时看门狗任务实现崩溃自拉起
+v0.9：支持 pyinstaller 单文件打包（scripts\\build_exe.bat），打包后
+`IMEStats.exe --word-worker` 复用同一 exe 跑分词，无需 Python 环境。
 
-依赖：pip install -r requirements.txt
-运行：pythonw ime_stats.py   （pythonw 无黑窗口）
+依赖（脚本方式运行时）：pip install -r requirements.txt
+运行：pythonw ime_stats.py 或打包后的 IMEStats.exe
 """
 
 import os
@@ -38,7 +35,9 @@ import pystray
 from PIL import Image, ImageDraw
 import tkinter as tk
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+FROZEN = getattr(sys, "frozen", False)
+APP_DIR = (os.path.dirname(sys.executable) if FROZEN
+           else os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(APP_DIR, "stats.db")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 WORD_WORKER = os.path.join(APP_DIR, "word_worker.py")
@@ -105,6 +104,7 @@ class Store:
     def __init__(self):
         self.conn = sqlite3.connect(DB_PATH, check_same_thread=False,
                                     timeout=15)
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self.lock = threading.Lock()
         self.conn.execute("""CREATE TABLE IF NOT EXISTS daily(
             date TEXT PRIMARY KEY,
@@ -297,7 +297,7 @@ class KeyCounter:
 
 # ---------------- Rime 上屏日志读取 ----------------
 class CommitLogReader:
-    """只统计中文字数/时段；分词由独立的 word_worker.py 进程负责"""
+    """只统计中文字数/时段；分词由独立的 word worker 进程负责"""
 
     def __init__(self, store):
         self.store = store
@@ -432,10 +432,12 @@ class App:
     # ---- 词频 Worker（独立进程，跑完即退；jieba 不占常驻内存）----
     def run_word_worker(self):
         try:
-            if os.path.exists(WORD_WORKER):
-                subprocess.Popen(
-                    [sys.executable, WORD_WORKER],
-                    creationflags=0x08000000)   # CREATE_NO_WINDOW
+            if FROZEN:      # 单文件 exe：复用自身
+                subprocess.Popen([sys.executable, "--word-worker"],
+                                 creationflags=0x08000000)  # CREATE_NO_WINDOW
+            elif os.path.exists(WORD_WORKER):
+                subprocess.Popen([sys.executable, WORD_WORKER],
+                                 creationflags=0x08000000)
         except Exception:
             pass
 
@@ -698,6 +700,10 @@ def ensure_single_instance():
 
 
 if __name__ == "__main__":
+    if "--word-worker" in sys.argv:     # 单文件 exe 复用自身跑分词
+        import word_worker
+        word_worker.main()
+        sys.exit(0)
     ensure_single_instance()
     App().run()
-# v0.8
+# v0.9
