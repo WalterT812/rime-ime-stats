@@ -8,6 +8,10 @@ patch:
   style/inline_preedit: true      # 编码嵌入光标处，体验接近系统输入法
   style/label_format: "%s"        # 序号不带点，更清爽
 
+  # 关闭中英切换等状态提示（光标旁弹出的小图标/气泡）
+  style/show_notifications: false
+  style/show_notifications_time: 0
+
   # 布局：加大留白、圆角、柔和阴影，告别紧凑感
   style/layout/border_width: 0
   style/layout/round_corner: 10   # 高亮块圆角
@@ -34,4 +38,33 @@ patch:
     candidate_text_color: 0x595959        # 候选词：柔和深灰
     comment_text_color: 0xB4B4B4
     hilited_candidate_back_color: 0xFCF1E4   # 首选背景：淡雾蓝 RGB(E4,F1,FC)
-    hilited_candidate_text_color: 0xD97133   # 首选文字：柔蓝 RGB(33,71,
+    hilited_candidate_text_color: 0xD97133   # 首选文字：柔蓝 RGB(33,71,D9)
+    hilited_label_color: 0xE8B98C
+    hilited_comment_text_color: 0xC8A878
+
+  # ---------- 游戏兼容（核心） ----------
+  # app_options：对指定进程自动切换行为。
+  # ascii_mode: true  → 在该程序里启动时直接处于英文直通模式，
+  #                     按键不经过中文引擎，零延迟、不弹候选框，
+  #                     需要打中文时按左Shift临时切回即可。
+  # inline_preedit: false → 部分全屏游戏内嵌编码会渲染异常，改用独立小窗。
+  # 进程名一律小写。把你常玩的游戏 exe 名加进来即可。
+  app_options:
+    # --- 常见竞技/网游 ---
+    cs2.exe: { ascii_mode: true }
+    valorant.exe: { ascii_mode: true }
+    valorant-win64-shipping.exe: { ascii_mode: true }
+    "league of legends.exe": { ascii_mode: true, inline_preedit: false }
+    crossfire.exe: { ascii_mode: true }
+    dota2.exe: { ascii_mode: true }
+    r5apex.exe: { ascii_mode: true }            # Apex
+    # --- 米哈游系 ---
+    yuanshen.exe: { ascii_mode: true, inline_preedit: false }   # 原神
+    starrail.exe: { ascii_mode: true, inline_preedit: false }   # 星穹铁道
+    zenlesszonezero.exe: { ascii_mode: true, inline_preedit: false }
+    # --- 其他 ---
+    wuthering waves.exe: { ascii_mode: true, inline_preedit: false }
+    eldenring.exe: { ascii_mode: true }
+    # 终端/IDE 默认英文（可按需删除）
+    windowsterminal.exe: { ascii_mode: true }
+    openconsole.exe: { ascii_mode: true }

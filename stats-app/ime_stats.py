@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IME Stats —— 输入统计托盘程序 v0.6
+IME Stats —— 输入统计托盘程序 v0.7
 ================================
 功能：
   1. 全局统计按键次数（被动低级钩子，对游戏无干扰）
@@ -9,6 +9,9 @@ IME Stats —— 输入统计托盘程序 v0.6
   4. 托盘面板实时刷新：指标卡片、14天趋势、今日时段分布、常用词Top10
   5. 每周一自动生成上周输入周报（docs/reports/*.md）
   6. 数据存 SQLite（stats.db），所有数据仅保存在本机
+
+常用词使用 jieba 分词（"添加一个新功能吧" → 添加/一个/新功能），
+未安装 jieba 时退化为整句计数。首次升级会自动用新算法重建历史词频。
 
 依赖：pip install -r requirements.txt
 运行：pythonw ime_stats.py   （pythonw 无黑窗口）
@@ -30,6 +33,13 @@ from pynput import keyboard
 import pystray
 from PIL import Image, ImageDraw
 import tkinter as tk
+
+try:
+    import jieba
+    jieba.setLogLevel(60)        # 关掉加载日志
+    HAS_JIEBA = True
+except ImportError:
+    HAS_JIEBA = False
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(APP_DIR, "stats.db")
@@ -91,6 +101,17 @@ def is_cjk(ch):
             or 0x20000 <= cp <= 0x2A6DF or 0xF900 <= cp <= 0xFAFF)
 
 
+def extract_words(text):
+    """从一次上屏文本里提取"词"：jieba 分词后取 ≥2 字的纯汉字词；
+    单字（的/吧/了…）不算词。无 jieba 时退化为整句计数。"""
+    if HAS_JIEBA:
+        return [w for w in jieba.lcut(text)
+                if len(w) >= 2 and all(is_cjk(c) for c in w)]
+    if 2 <= len(text) <= 6 and all(is_cjk(c) for c in text):
+        return [text]
+    return []
+
+
 # ---------------- 数据层 ----------------
 class Store:
     def __init__(self):
@@ -145,6 +166,11 @@ class Store:
                    ON CONFLICT(word) DO UPDATE SET
                      count=count+excluded.count""",
                 list(counts.items()))
+            self.conn.commit()
+
+    def clear_words(self):
+        with self.lock:
+            self.conn.execute("DELETE FROM word_freq")
             self.conn.commit()
 
     def get_meta(self, k, default="0"):
@@ -331,9 +357,8 @@ class CommitLogReader:
                         d, h = datetime.date.today().isoformat(), 0
                     day_cn[d] = day_cn.get(d, 0) + cn
                     hour_cn[(d, h)] = hour_cn.get((d, h), 0) + cn
-                # 常用词：2~6 个纯汉字的整体上屏才算一个"词"
-                if 2 <= len(text) <= 6 and cn == len(text):
-                    words[text] = words.get(text, 0) + 1
+                for w in extract_words(text):
+                    words[w] = words.get(w, 0) + 1
             self.offset = f.tell()
         for d, cn in day_cn.items():
             self.store.add(d, cn=cn)
@@ -341,6 +366,26 @@ class CommitLogReader:
             self.store.add_hourly(d, h, cn=cn)
         self.store.add_words(words)
         self.store.set_meta("commit_log_offset", self.offset)
+
+
+def rebuild_word_freq(store):
+    """jieba 可用且词频还是旧"整句"算法时：清空词频，从完整日志重建一次"""
+    try:
+        if not HAS_JIEBA or store.get_meta("word_seg_ver", "1") == "2":
+            return
+        store.clear_words()
+        words = {}
+        if os.path.exists(COMMIT_LOG):
+            with open(COMMIT_LOG, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    parts = line.rstrip("\n").split("\t", 1)
+                    if len(parts) == 2:
+                        for w in extract_words(parts[1]):
+                            words[w] = words.get(w, 0) + 1
+        store.add_words(words)
+        store.set_meta("word_seg_ver", "2")
+    except Exception:
+        pass
 
 
 # ---------------- 周报生成 ----------------
@@ -529,9 +574,10 @@ class App:
         self._chart_cache = None
 
         # 常用词 Top 10
-        tk.Label(wrap, text="常用词 Top 10", font=("微软雅黑", 9),
-                 bg=self.BG, fg=self.SUB, anchor="w").pack(fill="x",
-                                                           pady=(14, 3))
+        tk.Label(wrap, text="常用词 Top 10" +
+                 ("" if HAS_JIEBA else "（pip install jieba 后可智能分词）"),
+                 font=("微软雅黑", 9), bg=self.BG, fg=self.SUB,
+                 anchor="w").pack(fill="x", pady=(14, 3))
         self._words_var = tk.StringVar()
         tk.Label(wrap, textvariable=self._words_var, font=("微软雅黑", 10),
                  bg=self.CARD, fg=self.FG, justify="left", anchor="w",
@@ -636,6 +682,7 @@ class App:
             self.root.destroy()
 
     def run(self):
+        rebuild_word_freq(self.store)   # 升级分词算法后一次性重建历史词频
         self.counter.start()
         threading.Thread(target=self.flusher, daemon=True).start()
         threading.Thread(target=maybe_weekly_report,
@@ -656,4 +703,4 @@ def ensure_single_instance():
 if __name__ == "__main__":
     ensure_single_instance()
     App().run()
-# v0.6
+# v0.7
