@@ -68,3 +68,7 @@ patch:
     # 终端/IDE 默认英文（可按需删除）
     windowsterminal.exe: { ascii_mode: true }
     openconsole.exe: { ascii_mode: true }
+
+  # 新版小狼毫的通知开关在根级（build 里 style/ 下那份不生效）
+  show_notifications: false
+  show_notifications_time: 0
