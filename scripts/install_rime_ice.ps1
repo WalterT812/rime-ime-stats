@@ -27,7 +27,8 @@ Write-Host "复制方案文件到 $dst ..."
 Get-ChildItem $srcDir.FullName -Recurse -File |
     Where-Object { $_.Name -notmatch "\.(md|txt)$" -and
                    $_.Name -notlike "*.custom.yaml" -and
-                   $_.Name -ne "rime.lua" } |
+                   $_.Name -ne "rime.lua" -and
+                   $_.Name -ne "custom_phrase.txt" } |
     ForEach-Object {
         $rel = $_.FullName.Substring($srcDir.FullName.Length + 1)
         $target = Join-Path $dst $rel

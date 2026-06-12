@@ -1,17 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-IME Stats —— 输入统计托盘程序 v0.7
+IME Stats —— 输入统计托盘程序 v0.8
 ================================
 功能：
   1. 全局统计按键次数（被动低级钩子，对游戏无干扰）
-  2. 读取 Rime 上屏日志（commit_log.txt）统计中文字数 / 常用词
+  2. 读取 Rime 上屏日志（commit_log.txt）统计中文字数
   3. 英文模式下统计英文字符数 / 单词数
-  4. 托盘面板实时刷新：指标卡片、14天趋势、今日时段分布、常用词Top10
+  4. 托盘面板实时刷新：指标卡片、今日时段分布、14天趋势、常用词Top10
   5. 每周一自动生成上周输入周报（docs/reports/*.md）
   6. 数据存 SQLite（stats.db），所有数据仅保存在本机
 
-常用词使用 jieba 分词（"添加一个新功能吧" → 添加/一个/新功能），
-未安装 jieba 时退化为整句计数。首次升级会自动用新算法重建历史词频。
+v0.8 架构变化：
+  - jieba/pypinyin 移到独立进程 word_worker.py（每 6 小时或托盘手动触发，
+    跑完即退），常驻内存降回 ~40MB；高频词自动写入 Rime custom_phrase
+  - commit_log.txt 超过 2MB 且完全消化后自动归档轮转
+  - 配合 enable_autostart.bat 注册的每小时看门狗任务实现崩溃自拉起
 
 依赖：pip install -r requirements.txt
 运行：pythonw ime_stats.py   （pythonw 无黑窗口）
@@ -25,6 +28,7 @@ import queue
 import sqlite3
 import threading
 import datetime
+import subprocess
 import ctypes
 from ctypes import wintypes
 
@@ -34,19 +38,14 @@ import pystray
 from PIL import Image, ImageDraw
 import tkinter as tk
 
-try:
-    import jieba
-    jieba.setLogLevel(60)        # 关掉加载日志
-    HAS_JIEBA = True
-except ImportError:
-    HAS_JIEBA = False
-
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(APP_DIR, "stats.db")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+WORD_WORKER = os.path.join(APP_DIR, "word_worker.py")
 REPORTS_DIR = os.path.join(os.path.dirname(APP_DIR), "docs", "reports")
 RIME_USER_DIR = os.path.join(os.environ.get("APPDATA", ""), "Rime")
 COMMIT_LOG = os.path.join(RIME_USER_DIR, "commit_log.txt")
+LOG_ROTATE_BYTES = 2 * 1024 * 1024      # 超过 2MB 触发归档
 
 DEFAULT_CONFIG = {
     # 在这些进程前台时完全跳过计数（一般不需要，钩子是被动的；
@@ -101,21 +100,11 @@ def is_cjk(ch):
             or 0x20000 <= cp <= 0x2A6DF or 0xF900 <= cp <= 0xFAFF)
 
 
-def extract_words(text):
-    """从一次上屏文本里提取"词"：jieba 分词后取 ≥2 字的纯汉字词；
-    单字（的/吧/了…）不算词。无 jieba 时退化为整句计数。"""
-    if HAS_JIEBA:
-        return [w for w in jieba.lcut(text)
-                if len(w) >= 2 and all(is_cjk(c) for c in w)]
-    if 2 <= len(text) <= 6 and all(is_cjk(c) for c in text):
-        return [text]
-    return []
-
-
 # ---------------- 数据层 ----------------
 class Store:
     def __init__(self):
-        self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        self.conn = sqlite3.connect(DB_PATH, check_same_thread=False,
+                                    timeout=15)
         self.lock = threading.Lock()
         self.conn.execute("""CREATE TABLE IF NOT EXISTS daily(
             date TEXT PRIMARY KEY,
@@ -155,22 +144,6 @@ class Store:
                      keys=keys+excluded.keys,
                      cn_chars=cn_chars+excluded.cn_chars""",
                 (date, hour, keys, cn))
-            self.conn.commit()
-
-    def add_words(self, counts):
-        if not counts:
-            return
-        with self.lock:
-            self.conn.executemany(
-                """INSERT INTO word_freq(word, count) VALUES(?,?)
-                   ON CONFLICT(word) DO UPDATE SET
-                     count=count+excluded.count""",
-                list(counts.items()))
-            self.conn.commit()
-
-    def clear_words(self):
-        with self.lock:
-            self.conn.execute("DELETE FROM word_freq")
             self.conn.commit()
 
     def get_meta(self, k, default="0"):
@@ -324,6 +297,8 @@ class KeyCounter:
 
 # ---------------- Rime 上屏日志读取 ----------------
 class CommitLogReader:
+    """只统计中文字数/时段；分词由独立的 word_worker.py 进程负责"""
+
     def __init__(self, store):
         self.store = store
         self.offset = int(store.get_meta("commit_log_offset", "0"))
@@ -341,7 +316,7 @@ class CommitLogReader:
             self.offset = 0
         if size == self.offset:
             return
-        day_cn, hour_cn, words = {}, {}, {}
+        day_cn, hour_cn = {}, {}
         with open(COMMIT_LOG, "r", encoding="utf-8", errors="ignore") as f:
             f.seek(self.offset)
             for line in f:
@@ -357,35 +332,12 @@ class CommitLogReader:
                         d, h = datetime.date.today().isoformat(), 0
                     day_cn[d] = day_cn.get(d, 0) + cn
                     hour_cn[(d, h)] = hour_cn.get((d, h), 0) + cn
-                for w in extract_words(text):
-                    words[w] = words.get(w, 0) + 1
             self.offset = f.tell()
         for d, cn in day_cn.items():
             self.store.add(d, cn=cn)
         for (d, h), cn in hour_cn.items():
             self.store.add_hourly(d, h, cn=cn)
-        self.store.add_words(words)
         self.store.set_meta("commit_log_offset", self.offset)
-
-
-def rebuild_word_freq(store):
-    """jieba 可用且词频还是旧"整句"算法时：清空词频，从完整日志重建一次"""
-    try:
-        if not HAS_JIEBA or store.get_meta("word_seg_ver", "1") == "2":
-            return
-        store.clear_words()
-        words = {}
-        if os.path.exists(COMMIT_LOG):
-            with open(COMMIT_LOG, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    parts = line.rstrip("\n").split("\t", 1)
-                    if len(parts) == 2:
-                        for w in extract_words(parts[1]):
-                            words[w] = words.get(w, 0) + 1
-        store.add_words(words)
-        store.set_meta("word_seg_ver", "2")
-    except Exception:
-        pass
 
 
 # ---------------- 周报生成 ----------------
@@ -477,13 +429,56 @@ class App:
         self.root.withdraw()
         self.root.title("IME Stats")
 
+    # ---- 词频 Worker（独立进程，跑完即退；jieba 不占常驻内存）----
+    def run_word_worker(self):
+        try:
+            if os.path.exists(WORD_WORKER):
+                subprocess.Popen(
+                    [sys.executable, WORD_WORKER],
+                    creationflags=0x08000000)   # CREATE_NO_WINDOW
+        except Exception:
+            pass
+
+    def word_scheduler(self):
+        while True:
+            self.run_word_worker()
+            time.sleep(6 * 3600)
+
+    # ---- 日志轮转：超 2MB 且字数/词频均已消化完才归档 ----
+    def maybe_rotate_log(self):
+        try:
+            if not os.path.exists(COMMIT_LOG):
+                return
+            size = os.path.getsize(COMMIT_LOG)
+            if size < LOG_ROTATE_BYTES:
+                return
+            self.reader.poll()          # 字数先追平
+            if int(self.store.get_meta("word_log_offset", "0")) < size:
+                self.run_word_worker()  # 词频还没消化完，先催一把，下轮再轮转
+                return
+            arch_dir = os.path.join(RIME_USER_DIR, "commit_log_archive")
+            os.makedirs(arch_dir, exist_ok=True)
+            dst = os.path.join(arch_dir, "commit_log_%s.txt" %
+                               datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+            with self.reader.lock:
+                os.rename(COMMIT_LOG, dst)
+                self.reader.offset = 0
+                self.store.set_meta("commit_log_offset", 0)
+                self.store.set_meta("word_log_offset", 0)
+        except Exception:
+            pass
+
     # ---- 后台线程：定时落盘 ----
     def flusher(self):
+        loops = 0
         while True:
             time.sleep(self.config["flush_interval_sec"])
             try:
                 self.counter.flush()
                 self.reader.poll()
+                loops += 1
+                if loops % 120 == 0:    # 约每小时检查一次轮转
+                    self.maybe_rotate_log()
             except Exception:
                 pass
 
@@ -499,6 +494,8 @@ class App:
                 pystray.MenuItem("统计面板",
                                  lambda: self.ui_queue.put("panel"),
                                  default=True),
+                pystray.MenuItem("立即更新词频/喂词",
+                                 lambda: self.run_word_worker()),
                 pystray.MenuItem("暂停统计", toggle_pause,
                                  checked=lambda i: self.counter.paused),
                 pystray.MenuItem("退出", lambda: self.ui_queue.put("quit")),
@@ -574,8 +571,8 @@ class App:
         self._chart_cache = None
 
         # 常用词 Top 10
-        tk.Label(wrap, text="常用词 Top 10" +
-                 ("" if HAS_JIEBA else "（pip install jieba 后可智能分词）"),
+        tk.Label(wrap,
+                 text="常用词 Top 10（每 6 小时后台更新，托盘菜单可手动更新）",
                  font=("微软雅黑", 9), bg=self.BG, fg=self.SUB,
                  anchor="w").pack(fill="x", pady=(14, 3))
         self._words_var = tk.StringVar()
@@ -682,9 +679,9 @@ class App:
             self.root.destroy()
 
     def run(self):
-        rebuild_word_freq(self.store)   # 升级分词算法后一次性重建历史词频
         self.counter.start()
         threading.Thread(target=self.flusher, daemon=True).start()
+        threading.Thread(target=self.word_scheduler, daemon=True).start()
         threading.Thread(target=maybe_weekly_report,
                          args=(self.store,), daemon=True).start()
         self.build_tray()
@@ -703,4 +700,4 @@ def ensure_single_instance():
 if __name__ == "__main__":
     ensure_single_instance()
     App().run()
-# v0.7
+# v0.8
