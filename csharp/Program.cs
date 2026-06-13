@@ -1000,12 +1000,12 @@ namespace IMEStatsSharp
             }
 
             using var mutex = new Mutex(false, "IMEStats_SingleInstance_Mutex", out bool createdNew);
-            if (!createdNew)                // 已有实例（含 Python 版）在跑
+            if (!createdNew)
             {
-                MessageBox.Show(
-                    "输入统计已经在运行了。\n\n很可能是另一个版本（Python 版）还在任务栏托盘里。\n" +
-                    "两个版本共用同一份数据，不能同时开。\n请先右键那个托盘图标 → 退出，再启动本程序。",
-                    "IME Stats（C# 版）", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                // 已有实例在跑：静默退出，不弹窗。
+                // 看门狗每小时会拉起本程序，发现已在运行就走这里——之前这里弹"已在运行"
+                // 对话框，导致每小时一个弹窗。单实例程序本就该静默退出（双击 exe 时同理，
+                // 想看面板点托盘图标即可）。
                 return;
             }
 
