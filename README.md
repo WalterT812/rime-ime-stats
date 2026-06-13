@@ -35,11 +35,14 @@ IME/
 1. 装小狼毫：https://rime.im
 2. `scripts\install_rime_ice.ps1` —— 装雾凇拼音并自动部署
 3. `scripts\deploy_rime_config.ps1` —— 部署本项目配置 → 右键小狼毫「重新部署」
-4. 统计程序（二选一，推荐 C# 版）：
-   - **C# 版（主力）**：装 .NET 8 SDK 后双击 `scripts\build_csharp.bat`，产物 `stats-app\IMEStatsSharp.exe`
-   - Python 版：`cd stats-app && pip install -r requirements.txt`，再 `scripts\build_exe.bat` 打包
-   - 词频/喂词仍由 Python 的 `word_worker.py` 负责（jieba+pypinyin），C# 版会自动拉起它
-5. `scripts\enable_autostart.bat` —— 开机自启 + 看门狗（自动优先 C# 版）
+4. 统计程序（C# 版为主力）：
+   - **推荐**：装 .NET 8 SDK 后运行 `scripts\install.ps1` —— 一步**编译 + 安装到
+     `%LOCALAPPDATA%\IMEStats` + 注册自启/看门狗 + 启动**，程序与源码仓库解耦，
+     今后移动/删除本仓库都不影响运行（数据本就在 `%APPDATA%\IMEStats`）
+   - 或仅编译不安装：`scripts\build_csharp.bat` → `stats-app\IMEStatsSharp.exe`，
+     再 `scripts\enable_autostart.bat` 注册自启
+   - 词频/喂词由 Python 的 `word_worker.py` 负责（jieba+pypinyin），C# 版会自动拉起它
+   - Python 版（参考）：`cd stats-app && pip install -r requirements.txt` 后 `pythonw ime_stats.py`
 
 > 两版**共用**同一份数据库（`%APPDATA%\IMEStats\stats.db`）、上屏日志和单实例锁，
 > 不会同时运行、不会重复计数，随时可互换。

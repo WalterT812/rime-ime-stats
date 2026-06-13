@@ -847,8 +847,8 @@ namespace IMEStatsSharp
         public static readonly string RimeDir =
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Rime");
         public static readonly string CommitLog = Path.Combine(RimeDir, "commit_log.txt");
-        public static readonly string ReportsDir =
-            Path.Combine(Path.GetDirectoryName(AppDir) ?? AppDir, "docs", "reports");
+        // 周报存数据目录（与源码仓库位置无关，移动/删除仓库也不丢）
+        public static readonly string ReportsDir = Path.Combine(DataDir, "reports");
         private const long RotateBytes = 2 * 1024 * 1024;
 
         private static Store _store;

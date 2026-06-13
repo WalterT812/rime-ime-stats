@@ -42,7 +42,8 @@ DATA_DIR = os.path.join(os.environ.get("APPDATA", APP_DIR), "IMEStats")
 DB_PATH = os.path.join(DATA_DIR, "stats.db")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 WORD_WORKER = os.path.join(APP_DIR, "word_worker.py")
-REPORTS_DIR = os.path.join(os.path.dirname(APP_DIR), "docs", "reports")
+# 周报存数据目录（与源码仓库位置无关，移动/删除仓库也不丢）
+REPORTS_DIR = os.path.join(DATA_DIR, "reports")
 RIME_USER_DIR = os.path.join(os.environ.get("APPDATA", ""), "Rime")
 COMMIT_LOG = os.path.join(RIME_USER_DIR, "commit_log.txt")
 LOG_ROTATE_BYTES = 2 * 1024 * 1024      # 超过 2MB 触发归档
