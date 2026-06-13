@@ -587,9 +587,29 @@ namespace IMEStatsSharp
         private static NotifyIcon _tray;
         private static PanelForm _panel;
 
+        public static readonly string CrashLog = Path.Combine(DataDir, "crash.log");
+
+        // 全局兜底：WinExe 无控制台，任何未捕获异常都写进 crash.log 便于排查
+        // （C# 单文件缺原生库那次就是静默崩溃，有此日志可一眼定位）
+        public static void Log(string where, Exception ex)
+        {
+            try
+            {
+                Directory.CreateDirectory(DataDir);
+                File.AppendAllText(CrashLog,
+                    $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} [{where}] {ex}\n\n");
+            }
+            catch { }
+        }
+
         [STAThread]
         private static void Main()
         {
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+                Log("UnhandledException", e.ExceptionObject as Exception ?? new Exception("非异常对象: " + e.ExceptionObject));
+            Application.ThreadException += (s, e) => Log("ThreadException", e.Exception);
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+
             using var mutex = new Mutex(false, "IMEStats_SingleInstance_Mutex", out bool createdNew);
             if (!createdNew)                // 已有实例（含 Python 版）在跑
             {
@@ -602,12 +622,27 @@ namespace IMEStatsSharp
 
             ApplicationConfiguration.Initialize();
 
-            EnsureDatabase();           // 首次运行迁移旧数据库到统一位置
-            _store = new Store(DbPath);
-            var (skip, flushSec) = LoadConfig();    // config.json 与 Python 版共用
-            _counter = new KeyCounter(_store, skip);
-            _reader = new CommitLogReader(_store);
-            _counter.Start();
+            int flushSec;
+            try
+            {
+                EnsureDatabase();           // 首次运行迁移旧数据库到统一位置
+                _store = new Store(DbPath);
+                HashSet<string> skip;
+                (skip, flushSec) = LoadConfig();    // config.json 与 Python 版共用
+                _counter = new KeyCounter(_store, skip);
+                _reader = new CommitLogReader(_store);
+                _counter.Start();
+            }
+            catch (Exception ex)
+            {
+                // 启动失败（如缺原生库、库被占用）：写日志 + 明确告知，而非静默退出
+                Log("Startup", ex);
+                MessageBox.Show(
+                    "统计程序启动失败：\n" + ex.Message +
+                    "\n\n详情见 " + CrashLog,
+                    "IME Stats（C# 版）", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
 
             // 落盘线程：每 flushSec 落盘；约每小时检查日志轮转 + 周报
             // （周报放循环里：长期不重启也能在跨周后正常生成，meta 标记防重复）
