@@ -426,24 +426,24 @@ namespace IMEStatsSharp
             var bmp = new Bitmap(s, s);
             using var g = Graphics.FromImage(bmp);
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-            float m = s * 0.08f, r = s * 0.28f;
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            float m = s * 0.085f, r = s * 0.30f;             // 更柔的圆角方块
             var rect = new RectangleF(m, m, s - 2 * m, s - 2 * m);
             using var path = Round(rect, r);
-            Color top = paused ? ColorTranslator.FromHtml("#B7BCC6") : ColorTranslator.FromHtml("#5A7BFF");
-            Color bot = paused ? ColorTranslator.FromHtml("#8A909C") : ColorTranslator.FromHtml("#3344CC");
-            using (var lg = new LinearGradientBrush(rect, top, bot, 90f))
+            Color top = paused ? ColorTranslator.FromHtml("#BCC1CB") : ColorTranslator.FromHtml("#5B86FF");
+            Color bot = paused ? ColorTranslator.FromHtml("#8B919D") : ColorTranslator.FromHtml("#2E45D4");
+            using (var lg = new LinearGradientBrush(
+                new RectangleF(rect.X, rect.Y - 1, rect.Width, rect.Height + 2), top, bot, 90f))
                 g.FillPath(lg, path);
-            // 顶部高光，增加立体感
-            var glo = new RectangleF(m, m, s - 2 * m, (s - 2 * m) * 0.5f);
+            // 顶部高光（柔和），增加立体感
+            var glo = new RectangleF(m, m, s - 2 * m, (s - 2 * m) * 0.52f);
             using (var gp = Round(glo, r))
-            using (var lg2 = new LinearGradientBrush(glo, Color.FromArgb(70, 255, 255, 255), Color.FromArgb(0, 255, 255, 255), 90f))
+            using (var lg2 = new LinearGradientBrush(glo,
+                Color.FromArgb(55, 255, 255, 255), Color.FromArgb(0, 255, 255, 255), 90f))
                 g.FillPath(lg2, gp);
-            // "字"
-            using var f = new Font("微软雅黑", s * 0.5f, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-            var box = new RectangleF(m, m * 0.6f, s - 2 * m, s - 2 * m);
-            g.DrawString("字", f, Brushes.White, box, sf);
+            // "字"：路径墨迹居中，占方块约 56%
+            using var fam = new FontFamily("微软雅黑");
+            FillGlyphCentered(g, "字", fam, Brushes.White, rect, 0.56f);
             return bmp;
         }
 
@@ -458,6 +458,32 @@ namespace IMEStatsSharp
             p.AddArc(rc.X, rc.Bottom - d, d, d, 90, 90);
             p.CloseFigure();
             return p;
+        }
+
+        // 把字形转成路径，按"墨迹包围盒"在 rect 内精确居中并缩放到占比 fill。
+        // 比 DrawString 居中可靠：DrawString 用字体行高(含上下空白)定位，CJK/数字会偏。
+        public static void FillGlyphCentered(Graphics g, string text, FontFamily fam,
+                                             Brush brush, RectangleF rect, float fill)
+        {
+            using var path = new GraphicsPath();
+            path.AddString(text, fam, (int)FontStyle.Bold, 100f, new PointF(0, 0),
+                           StringFormat.GenericTypographic);
+            var b = path.GetBounds();
+            if (b.Width <= 0 || b.Height <= 0) return;
+            using (var m1 = new Matrix()) { m1.Translate(-b.X, -b.Y); path.Transform(m1); }   // 墨迹移到原点
+            float target = Math.Min(rect.Width, rect.Height) * fill;
+            float scale = target / Math.Max(b.Width, b.Height);
+            float w = b.Width * scale, h = b.Height * scale;
+            using (var m2 = new Matrix())
+            {
+                m2.Translate(rect.X + (rect.Width - w) / 2f, rect.Y + (rect.Height - h) / 2f);
+                m2.Scale(scale, scale);
+                path.Transform(m2);                                                          // 缩放后居中
+            }
+            var old = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.FillPath(brush, path);
+            g.SmoothingMode = old;
         }
 
         public static Icon Create(bool paused)
@@ -772,37 +798,40 @@ namespace IMEStatsSharp
             }
         }
 
-        // 常用词：胶囊标签自动换行
+        // 常用词：胶囊标签自动换行，序号圆点内的数字按墨迹精确居中
         private void DrawWords(Graphics g, Rectangle rc)
         {
             using var fW = new Font("微软雅黑", 9.5f);
-            using var fR = new Font("微软雅黑", 8.5f, FontStyle.Bold);
+            using var fam = new FontFamily("微软雅黑");
             using var bSub = new SolidBrush(SUB);
+            using var bf = new SolidBrush(FG);
+            using var sfV = new StringFormat { LineAlignment = StringAlignment.Center };
             if (_words.Count == 0)
             {
                 g.DrawString("还没有数据，去打几个字吧～", fW, bSub, rc.X + 16, rc.Y + 16);
                 return;
             }
-            float x = rc.X + 14, y = rc.Y + 14, maxX = rc.Right - 14, lh = 30;
+            const float ph = 26, circ = 18, padL = 5, gapTC = 7, padR = 13, lh = 33;
+            float x = rc.X + 14, y = rc.Y + 15, maxX = rc.Right - 14;
             for (int i = 0; i < _words.Count; i++)
             {
                 string label = $"{_words[i].Item1}  ×{_words[i].Item2}";
                 float tw = g.MeasureString(label, fW).Width;
-                float rank = 22, pillW = rank + tw + 16;
-                if (x + pillW > maxX) { x = rc.X + 14; y += lh; }
-                if (y + 24 > rc.Bottom) break;
-                var pill = new RectangleF(x, y, pillW, 24);
-                using (var p = IconFactory.Round(pill, 12))
+                float pillW = padL + circ + gapTC + tw + padR;
+                if (x + pillW > maxX && x > rc.X + 14) { x = rc.X + 14; y += lh; }
+                if (y + ph > rc.Bottom) break;
+                var pill = new RectangleF(x, y, pillW, ph);
+                using (var p = IconFactory.Round(pill, ph / 2))
                 using (var b = new SolidBrush(Color.FromArgb(242, 244, 250))) g.FillPath(b, p);
-                // 序号圆点
-                using (var b = new SolidBrush(i < 3 ? ACCENT : Color.FromArgb(190, 196, 208)))
-                    g.FillEllipse(b, x + 4, y + 4, 16, 16);
-                string rk = (i + 1).ToString();
-                float rkw = g.MeasureString(rk, fR).Width;
-                g.DrawString(rk, fR, Brushes.White, x + 4 + (16 - rkw) / 2, y + 5);
-                using (var bf = new SolidBrush(FG))
-                    g.DrawString(label, fW, bf, x + rank + 2, y + 4);
-                x += pillW + 8;
+                // 序号圆点（竖直居中）+ 数字（墨迹居中）
+                var circle = new RectangleF(x + padL, y + (ph - circ) / 2f, circ, circ);
+                using (var b = new SolidBrush(i < 3 ? ACCENT : Color.FromArgb(186, 192, 204)))
+                    g.FillEllipse(b, circle);
+                IconFactory.FillGlyphCentered(g, (i + 1).ToString(), fam, Brushes.White, circle, 0.5f);
+                // 词条文字（竖直居中）
+                g.DrawString(label, fW, bf,
+                    new RectangleF(x + padL + circ + gapTC, y, tw + 6, ph), sfV);
+                x += pillW + 9;
             }
         }
     }
@@ -946,6 +975,17 @@ namespace IMEStatsSharp
             };
             _tray.ContextMenuStrip.Items.Add("统计面板", null, (o, e) => ShowPanel());
             _tray.ContextMenuStrip.Items.Add("立即更新词频/喂词", null, (o, e) => RunWordWorker());
+            _tray.ContextMenuStrip.Items.Add(new ToolStripSeparator());
+
+            // 开机自启开关（写/删启动文件夹里的 vbs，勾选反映当前状态）
+            var auto = new ToolStripMenuItem("开机自启动") { Checked = AutostartEnabled() };
+            auto.Click += (o, e) => { SetAutostart(!AutostartEnabled()); auto.Checked = AutostartEnabled(); };
+            _tray.ContextMenuStrip.Items.Add(auto);
+            _tray.ContextMenuStrip.Items.Add("导出 CSV", null, (o, e) => ExportCsv());
+            _tray.ContextMenuStrip.Items.Add("打开数据文件夹", null, (o, e) =>
+            { try { Process.Start("explorer.exe", DataDir); } catch (Exception ex) { Log("OpenFolder", ex); } });
+            _tray.ContextMenuStrip.Items.Add(new ToolStripSeparator());
+
             var pause = new ToolStripMenuItem("暂停统计");
             pause.Click += (o, e) =>
             {
@@ -956,6 +996,8 @@ namespace IMEStatsSharp
                 old?.Dispose();         // 释放被换下的图标句柄
             };
             _tray.ContextMenuStrip.Items.Add(pause);
+            // 每次右键弹出前刷新"开机自启"勾选，避免外部改动后状态不同步
+            _tray.ContextMenuStrip.Opening += (o, e) => auto.Checked = AutostartEnabled();
             _tray.ContextMenuStrip.Items.Add("退出", null, (o, e) =>
             {
                 _counter.Flush(); _reader.Poll();
@@ -974,6 +1016,45 @@ namespace IMEStatsSharp
             if (_panel != null && !_panel.IsDisposed) { _panel.Activate(); return; }
             _panel = new PanelForm(_store, _counter, _reader);
             _panel.Show();
+        }
+
+        // ---- 开机自启：写/删启动文件夹里的 vbs（与 enable_autostart.bat 同一文件名） ----
+        private static string StartupVbs => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Startup), "ime_stats_autostart.vbs");
+
+        private static bool AutostartEnabled() => File.Exists(StartupVbs);
+
+        private static void SetAutostart(bool on)
+        {
+            try
+            {
+                if (on)
+                {
+                    string exe = Environment.ProcessPath ?? Path.Combine(AppDir, "IMEStatsSharp.exe");
+                    File.WriteAllText(StartupVbs,
+                        "Set ws = CreateObject(\"WScript.Shell\")\r\n" +
+                        "ws.Run \"\"\"" + exe + "\"\"\", 0, False\r\n");
+                }
+                else if (File.Exists(StartupVbs)) File.Delete(StartupVbs);
+            }
+            catch (Exception ex) { Log("Autostart", ex); }
+        }
+
+        // ---- 导出全部每日数据为 CSV（带 BOM，Excel 直接认中文）并在资源管理器选中 ----
+        private static void ExportCsv()
+        {
+            try
+            {
+                var rows = _store.RangeDays("0000-01-01", "9999-12-31");
+                var sb = new StringBuilder();
+                sb.AppendLine("日期,按键次数,中文字数,英文单词");
+                foreach (var r in rows)
+                    sb.AppendLine($"{r.date},{r.keys},{r.cn},{r.ew}");
+                string path = Path.Combine(DataDir, "导出统计_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv");
+                File.WriteAllText(path, sb.ToString(), new UTF8Encoding(true));
+                Process.Start("explorer.exe", "/select,\"" + path + "\"");
+            }
+            catch (Exception ex) { Log("ExportCsv", ex); }
         }
 
         // 读 stats-app\config.json（与 Python 版同一份）：skip_processes / flush_interval_sec
