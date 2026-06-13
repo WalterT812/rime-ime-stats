@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IME Stats —— 输入统计托盘程序 v0.9
+IME Stats —— 输入统计托盘程序 v1.2
 ================================
 功能：
   1. 全局统计按键次数（被动低级钩子，对游戏无干扰）
@@ -317,23 +317,29 @@ class CommitLogReader:
             self.offset = 0
         if size == self.offset:
             return
-        day_cn, hour_cn = {}, {}
-        with open(COMMIT_LOG, "r", encoding="utf-8", errors="ignore") as f:
+        with open(COMMIT_LOG, "rb") as f:
             f.seek(self.offset)
-            for line in f:
-                parts = line.rstrip("\n").split("\t", 1)
-                if len(parts) != 2:
-                    continue
-                ts, text = parts
-                cn = sum(1 for c in text if is_cjk(c))
-                if cn:
-                    try:                # 按日志自身时间归账，跨天也准确
-                        d, h = ts[:10], int(ts[11:13])
-                    except ValueError:
-                        d, h = datetime.date.today().isoformat(), 0
-                    day_cn[d] = day_cn.get(d, 0) + cn
-                    hour_cn[(d, h)] = hour_cn.get((d, h), 0) + cn
-            self.offset = f.tell()
+            data = f.read()
+        # 只消费到最后一个换行符：Rime 可能正写到半行，留给下次读，
+        # offset 按消费的字节数推进（不会跳过、也不会把半行当坏行丢掉）
+        end = data.rfind(b"\n")
+        if end < 0:
+            return
+        day_cn, hour_cn = {}, {}
+        for line in data[:end + 1].decode("utf-8", "ignore").split("\n"):
+            parts = line.rstrip("\r").split("\t", 1)
+            if len(parts) != 2:
+                continue
+            ts, text = parts
+            cn = sum(1 for c in text if is_cjk(c))
+            if cn:
+                try:                # 按日志自身时间归账，跨天也准确
+                    d, h = ts[:10], int(ts[11:13])
+                except ValueError:
+                    d, h = datetime.date.today().isoformat(), 0
+                day_cn[d] = day_cn.get(d, 0) + cn
+                hour_cn[(d, h)] = hour_cn.get((d, h), 0) + cn
+        self.offset += end + 1
         for d, cn in day_cn.items():
             self.store.add(d, cn=cn)
         for (d, h), cn in hour_cn.items():
@@ -452,18 +458,22 @@ class App:
         try:
             if not os.path.exists(COMMIT_LOG):
                 return
-            size = os.path.getsize(COMMIT_LOG)
-            if size < LOG_ROTATE_BYTES:
-                return
-            self.reader.poll()          # 字数先追平
-            if int(self.store.get_meta("word_log_offset", "0")) < size:
-                self.run_word_worker()  # 词频还没消化完，先催一把，下轮再轮转
+            if os.path.getsize(COMMIT_LOG) < LOG_ROTATE_BYTES:
                 return
             arch_dir = os.path.join(RIME_USER_DIR, "commit_log_archive")
             os.makedirs(arch_dir, exist_ok=True)
             dst = os.path.join(arch_dir, "commit_log_%s.txt" %
                                datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+            # 追平字数 → 校验词频 → 改名归档全程持锁：
+            # 锁内 Rime 新写入的行要么被追平统计到，要么留在新日志里，绝不丢
             with self.reader.lock:
+                self.reader._poll()     # 字数先追平
+                size = os.path.getsize(COMMIT_LOG)
+                if self.reader.offset < size:
+                    return              # 还有半行没写完，下轮再说
+                if int(self.store.get_meta("word_log_offset", "0")) < size:
+                    self.run_word_worker()  # 词频还没消化完，催一把，下轮再轮转
+                    return
                 os.rename(COMMIT_LOG, dst)
                 self.reader.offset = 0
                 self.store.set_meta("commit_log_offset", 0)
@@ -474,14 +484,17 @@ class App:
     # ---- 后台线程：定时落盘 ----
     def flusher(self):
         loops = 0
+        hourly = max(1, 3600 // self.config["flush_interval_sec"])
         while True:
             time.sleep(self.config["flush_interval_sec"])
             try:
                 self.counter.flush()
                 self.reader.poll()
                 loops += 1
-                if loops % 120 == 0:    # 约每小时检查一次轮转
+                if loops % hourly == 0:     # 约每小时：轮转 + 周报
                     self.maybe_rotate_log()
+                    # 周报放循环里：长期不重启也能在跨周后生成（meta 防重复）
+                    maybe_weekly_report(self.store)
             except Exception:
                 pass
 
@@ -731,4 +744,4 @@ if __name__ == "__main__":
     ensure_single_instance()
     migrate_db()
     App().run()
-# v0.9
+# v1.2

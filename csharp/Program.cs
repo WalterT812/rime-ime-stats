@@ -34,10 +34,18 @@ namespace IMEStatsSharp
         [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
         [DllImport("imm32.dll")] public static extern IntPtr ImmGetDefaultIMEWnd(IntPtr hWnd);
         [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, uint msg, UIntPtr wParam, IntPtr lParam, uint flags, uint timeout, out UIntPtr result);
+        [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+        [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon);
 
         public const int WH_KEYBOARD_LL = 13;
         public const int WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104;
         public const uint WM_IME_CONTROL = 0x0283, IMC_GETCONVERSIONMODE = 1, SMTO_ABORTIFHUNG = 2;
+        public const int VK_CONTROL = 0x11, VK_MENU = 0x12, VK_LWIN = 0x5B, VK_RWIN = 0x5C;
+
+        // Ctrl/Alt/Win 任一按下 → 当前按键是快捷键组合，不算正常输入的字母
+        public static bool ModifierDown() =>
+            GetAsyncKeyState(VK_CONTROL) < 0 || GetAsyncKeyState(VK_MENU) < 0 ||
+            GetAsyncKeyState(VK_LWIN) < 0 || GetAsyncKeyState(VK_RWIN) < 0;
 
         public static bool? ForegroundImeIsChinese()
         {
@@ -192,7 +200,8 @@ namespace IMEStatsSharp
         private readonly HashSet<string> _skip;
         private IntPtr _hook = IntPtr.Zero;
         private Native.HookProc _proc;          // 防 GC
-        private readonly BlockingCollection<int> _events = new BlockingCollection<int>();
+        private readonly BlockingCollection<(int vk, bool mod)> _events =
+            new BlockingCollection<(int, bool)>();
         public volatile bool Paused;
 
         private readonly object _lock = new object();
@@ -227,7 +236,8 @@ namespace IMEStatsSharp
                 ((long)wParam == Native.WM_KEYDOWN || (long)wParam == Native.WM_SYSKEYDOWN))
             {
                 int vk = Marshal.ReadInt32(lParam);     // KBDLLHOOKSTRUCT.vkCode
-                _events.TryAdd(vk);
+                // 修饰键状态必须在回调内取（入队后再查就不是按键当时的状态了）
+                _events.TryAdd((vk, Native.ModifierDown()));
             }
             return Native.CallNextHookEx(_hook, nCode, wParam, lParam);
         }
@@ -248,7 +258,7 @@ namespace IMEStatsSharp
 
         private void Work()
         {
-            foreach (int vk in _events.GetConsumingEnumerable())
+            foreach (var (vk, mod) in _events.GetConsumingEnumerable())
             {
                 try
                 {
@@ -259,7 +269,8 @@ namespace IMEStatsSharp
                     {
                         Keys++;
                         _hourAcc[hkey] = _hourAcc.TryGetValue(hkey, out long v) ? v + 1 : 1;
-                        bool isLetter = vk >= 0x41 && vk <= 0x5A;    // A-Z
+                        // Ctrl+C 等快捷键不算英文输入（与 Python 版口径一致）
+                        bool isLetter = !mod && vk >= 0x41 && vk <= 0x5A;    // A-Z
                         if (isLetter)
                         {
                             if (CachedImeChinese() != true) { EnChars++; _letterRun++; }
@@ -304,8 +315,20 @@ namespace IMEStatsSharp
             Offset = long.Parse(store.GetMeta("commit_log_offset", "0"));
         }
 
-        public static bool IsCjk(char c) =>
-            (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF) || (c >= 0xF900 && c <= 0xFAFF);
+        // 按 Unicode 码点统计 CJK 字数（含扩展 B 区生僻字，与 Python 版口径一致）
+        public static long CountCjk(string s)
+        {
+            long n = 0;
+            for (int i = 0; i < s.Length; i++)
+            {
+                int cp = s[i];
+                if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+                    cp = char.ConvertToUtf32(s[i], s[++i]);
+                if ((cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0x3400 && cp <= 0x4DBF) ||
+                    (cp >= 0x20000 && cp <= 0x2A6DF) || (cp >= 0xF900 && cp <= 0xFAFF)) n++;
+            }
+            return n;
+        }
 
         public void Poll()
         {
@@ -315,39 +338,59 @@ namespace IMEStatsSharp
             }
         }
 
+        // 调用方必须已持有 Lock（轮转归档前在锁内追平用）
+        public void PollNoLock()
+        {
+            try { PollInner(); } catch { }
+        }
+
         private void PollInner()
         {
             string path = Program.CommitLog;
             if (!File.Exists(path)) return;
-            long size = new FileInfo(path).Length;
-            if (size < Offset) Offset = 0;
-            if (size == Offset) return;
+            byte[] buf;
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                long size = fs.Length;
+                if (size < Offset) Offset = 0;      // 日志被清空/轮转
+                if (size == Offset) return;
+                fs.Seek(Offset, SeekOrigin.Begin);
+                buf = new byte[size - Offset];
+                int read = 0;
+                while (read < buf.Length)
+                {
+                    int n = fs.Read(buf, read, buf.Length - read);
+                    if (n <= 0) break;
+                    read += n;
+                }
+                if (read < buf.Length) Array.Resize(ref buf, read);
+            }
+            // 只消费到最后一个换行符为止：Rime 可能正写到半行，
+            // 留给下次读，offset 按消费的字节数推进（绝不跳过内容）
+            int end = Array.LastIndexOf(buf, (byte)'\n');
+            if (end < 0) return;
 
             var dayCn = new Dictionary<string, long>();
             var hourCn = new Dictionary<(string, int), long>();
-            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            string chunk = Encoding.UTF8.GetString(buf, 0, end + 1);
+            foreach (string raw in chunk.Split('\n'))
             {
-                fs.Seek(Offset, SeekOrigin.Begin);
-                using var sr = new StreamReader(fs, Encoding.UTF8);
-                string line;
-                while ((line = sr.ReadLine()) != null)
+                string line = raw.TrimEnd('\r');
+                int tab = line.IndexOf('\t');
+                if (tab < 0) continue;
+                string ts = line.Substring(0, tab), text = line.Substring(tab + 1);
+                long cn = CountCjk(text);
+                if (cn > 0)
                 {
-                    int tab = line.IndexOf('\t');
-                    if (tab < 0) continue;
-                    string ts = line.Substring(0, tab), text = line.Substring(tab + 1);
-                    long cn = text.Count(IsCjk);
-                    if (cn > 0)
-                    {
-                        string d = ts.Length >= 10 ? ts.Substring(0, 10) : DateTime.Today.ToString("yyyy-MM-dd");
-                        int h = 0;
-                        if (ts.Length >= 13) int.TryParse(ts.Substring(11, 2), out h);
-                        dayCn[d] = dayCn.TryGetValue(d, out long v) ? v + cn : cn;
-                        var hk = (d, h);
-                        hourCn[hk] = hourCn.TryGetValue(hk, out long v2) ? v2 + cn : cn;
-                    }
+                    string d = ts.Length >= 10 ? ts.Substring(0, 10) : DateTime.Today.ToString("yyyy-MM-dd");
+                    int h = 0;
+                    if (ts.Length >= 13) int.TryParse(ts.Substring(11, 2), out h);
+                    dayCn[d] = dayCn.TryGetValue(d, out long v) ? v + cn : cn;
+                    var hk = (d, h);
+                    hourCn[hk] = hourCn.TryGetValue(hk, out long v2) ? v2 + cn : cn;
                 }
-                Offset = fs.Length;
             }
+            Offset += end + 1;
             foreach (var kv in dayCn) _store.Add(kv.Key, 0, kv.Value, 0, 0);
             foreach (var kv in hourCn) _store.AddHourly(kv.Key.Item1, kv.Key.Item2, 0, kv.Value);
             _store.SetMeta("commit_log_offset", Offset.ToString());
@@ -561,22 +604,24 @@ namespace IMEStatsSharp
 
             EnsureDatabase();           // 首次运行迁移旧数据库到统一位置
             _store = new Store(DbPath);
-            var skip = new HashSet<string>();   // 如需对某些进程跳过计数，写在这里（小写 exe 名）
+            var (skip, flushSec) = LoadConfig();    // config.json 与 Python 版共用
             _counter = new KeyCounter(_store, skip);
             _reader = new CommitLogReader(_store);
             _counter.Start();
 
-            // 落盘 + 轮转线程
+            // 落盘线程：每 flushSec 落盘；约每小时检查日志轮转 + 周报
+            // （周报放循环里：长期不重启也能在跨周后正常生成，meta 标记防重复）
             new Thread(() =>
             {
-                int loops = 0;
+                int loops = 0, hourly = Math.Max(1, 3600 / flushSec);
+                WeeklyReport();
                 while (true)
                 {
-                    Thread.Sleep(30000);
+                    Thread.Sleep(flushSec * 1000);
                     try
                     {
                         _counter.Flush(); _reader.Poll();
-                        if (++loops % 120 == 0) MaybeRotate();
+                        if (++loops % hourly == 0) { MaybeRotate(); WeeklyReport(); }
                     }
                     catch { }
                 }
@@ -587,8 +632,6 @@ namespace IMEStatsSharp
             {
                 while (true) { RunWordWorker(); Thread.Sleep(6 * 3600 * 1000); }
             }) { IsBackground = true }.Start();
-
-            new Thread(WeeklyReport) { IsBackground = true }.Start();
 
             // 托盘
             _tray = new NotifyIcon
@@ -605,7 +648,9 @@ namespace IMEStatsSharp
             {
                 _counter.Paused = !_counter.Paused;
                 pause.Checked = _counter.Paused;
+                var old = _tray.Icon;
                 _tray.Icon = MakeIcon(_counter.Paused);
+                old?.Dispose();         // 释放被换下的图标句柄
             };
             _tray.ContextMenuStrip.Items.Add(pause);
             _tray.ContextMenuStrip.Items.Add("退出", null, (o, e) =>
@@ -639,7 +684,36 @@ namespace IMEStatsSharp
                 using var f = new Font("微软雅黑", 16, FontStyle.Bold);
                 g.DrawString("字", f, Brushes.White, 2, 2);
             }
-            return Icon.FromHandle(bmp.GetHicon());
+            // GetHicon 的句柄 GDI 不会自动回收：Clone 出托管副本后立即 DestroyIcon
+            IntPtr h = bmp.GetHicon();
+            try
+            {
+                using var tmp = Icon.FromHandle(h);
+                return (Icon)tmp.Clone();
+            }
+            finally { Native.DestroyIcon(h); }
+        }
+
+        // 读 stats-app\config.json（与 Python 版同一份）：skip_processes / flush_interval_sec
+        private static (HashSet<string> skip, int flushSec) LoadConfig()
+        {
+            var skip = new HashSet<string>();
+            int flushSec = 30;
+            try
+            {
+                string p = Path.Combine(AppDir, "config.json");
+                if (File.Exists(p))
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(p));
+                    if (doc.RootElement.TryGetProperty("skip_processes", out var sp))
+                        foreach (var e in sp.EnumerateArray())
+                            skip.Add((e.GetString() ?? "").ToLowerInvariant());
+                    if (doc.RootElement.TryGetProperty("flush_interval_sec", out var fi))
+                        flushSec = Math.Max(5, fi.GetInt32());
+                }
+            }
+            catch { }
+            return (skip, flushSec);
         }
 
         // 首次运行：把旧的 stats-app\stats.db 迁移到统一位置 %APPDATA%\IMEStats
@@ -698,15 +772,22 @@ namespace IMEStatsSharp
             try
             {
                 if (!File.Exists(CommitLog)) return;
-                long size = new FileInfo(CommitLog).Length;
-                if (size < RotateBytes) return;
-                _reader.Poll();
-                if (long.Parse(_store.GetMeta("word_log_offset", "0")) < size) { RunWordWorker(); return; }
+                if (new FileInfo(CommitLog).Length < RotateBytes) return;
                 string arch = Path.Combine(RimeDir, "commit_log_archive");
                 Directory.CreateDirectory(arch);
                 string dst = Path.Combine(arch, "commit_log_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".txt");
+                // 追平字数 → 校验词频 → 改名归档全程持锁：
+                // 锁内 Rime 新写入的行要么被追平统计到，要么留在新日志里，绝不丢
                 lock (_reader.Lock)
                 {
+                    _reader.PollNoLock();
+                    long size = new FileInfo(CommitLog).Length;
+                    if (_reader.Offset < size) return;  // 还有半行没写完，下轮再说
+                    if (long.Parse(_store.GetMeta("word_log_offset", "0")) < size)
+                    {
+                        RunWordWorker();                // 词频还没消化完，催一把，下轮再轮转
+                        return;
+                    }
                     File.Move(CommitLog, dst);
                     _reader.Offset = 0;
                     _store.SetMeta("commit_log_offset", "0");

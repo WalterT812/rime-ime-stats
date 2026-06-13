@@ -55,17 +55,20 @@ def update_word_freq(conn, jieba):
         if size < offset:               # 日志被轮转
             offset = 0
         if size > offset:
-            with open(COMMIT_LOG, "r", encoding="utf-8",
-                      errors="ignore") as f:
+            with open(COMMIT_LOG, "rb") as f:
                 f.seek(offset)
-                for line in f:
-                    parts = line.rstrip("\n").split("\t", 1)
+                data = f.read()
+            # 只消费完整行（半行留给下次），offset 按字节推进，与主程序口径一致
+            end = data.rfind(b"\n")
+            if end >= 0:
+                for line in data[:end + 1].decode("utf-8", "ignore").split("\n"):
+                    parts = line.rstrip("\r").split("\t", 1)
                     if len(parts) != 2:
                         continue
                     for w in jieba.lcut(parts[1]):
                         if len(w) >= 2 and all(is_cjk(c) for c in w):
                             words[w] = words.get(w, 0) + 1
-                offset = f.tell()
+                offset += end + 1
     if words:
         conn.executemany(
             """INSERT INTO word_freq(word, count) VALUES(?,?)

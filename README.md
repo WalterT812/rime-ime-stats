@@ -12,11 +12,13 @@ IME/
 │   ├── weasel.custom.yaml         walter_light 主题 + 游戏自动英文 + 关闭切换提示
 │   ├── rime_ice.custom.yaml       雾凇拼音补丁（挂统计日志）
 │   ├── rime.lua / lua/            上屏文字记录器（统计数据来源）
-├── stats-app/            统计程序（Python 版，稳定）
-│   ├── ime_stats.py               托盘主程序（v0.9）
+├── csharp/               统计程序（C# 版 v1.2，**主力**，更省内存）
+│   ├── Program.cs                 WinForms 单文件：钩子+面板+周报+轮转
+│   └── IMEStatsSharp.csproj
+├── stats-app/            统计程序（Python 版，参考实现，与 C# 共用数据）
+│   ├── ime_stats.py               托盘主程序
 │   ├── word_worker.py             分词/喂词独立进程（jieba+pypinyin）
 │   └── requirements.txt
-├── csharp/               统计程序（C# 版 v1.0，实验性，更省内存）
 ├── scripts/
 │   ├── deploy_rime_config.ps1     部署 Rime 配置（带备份）
 │   ├── install_rime_ice.ps1       安装/更新雾凇词库 + 自动重新部署
@@ -33,10 +35,14 @@ IME/
 1. 装小狼毫：https://rime.im
 2. `scripts\install_rime_ice.ps1` —— 装雾凇拼音并自动部署
 3. `scripts\deploy_rime_config.ps1` —— 部署本项目配置 → 右键小狼毫「重新部署」
-4. 统计程序（二选一）：
-   - `cd stats-app && pip install -r requirements.txt`，然后 `scripts\build_exe.bat` 打包
-   - 或装 .NET 8 后 `scripts\build_csharp.bat` 用 C# 版
-5. `scripts\enable_autostart.bat` —— 开机自启 + 看门狗
+4. 统计程序（二选一，推荐 C# 版）：
+   - **C# 版（主力）**：装 .NET 8 SDK 后双击 `scripts\build_csharp.bat`，产物 `stats-app\IMEStatsSharp.exe`
+   - Python 版：`cd stats-app && pip install -r requirements.txt`，再 `scripts\build_exe.bat` 打包
+   - 词频/喂词仍由 Python 的 `word_worker.py` 负责（jieba+pypinyin），C# 版会自动拉起它
+5. `scripts\enable_autostart.bat` —— 开机自启 + 看门狗（自动优先 C# 版）
+
+> 两版**共用**同一份数据库（`%APPDATA%\IMEStats\stats.db`）、上屏日志和单实例锁，
+> 不会同时运行、不会重复计数，随时可互换。
 
 ## 统计架构
 
