@@ -9,6 +9,10 @@
     <AssemblyName>IMEStatsSharp</AssemblyName>
     <RootNamespace>IMEStatsSharp</RootNamespace>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- 单文件发布时把原生库(e_sqlite3.dll)一并嵌入并运行时自解压，
+         否则只复制 exe 到别处会因找不到 e_sqlite3.dll 而启动即崩 -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <SelfContained>false</SelfContained>
   </PropertyGroup>
 
   <ItemGroup>
