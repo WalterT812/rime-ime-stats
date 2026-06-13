@@ -36,6 +36,26 @@ namespace IMEStatsSharp
         [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, uint msg, UIntPtr wParam, IntPtr lParam, uint flags, uint timeout, out UIntPtr result);
         [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
         [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon);
+        [DllImport("user32.dll")] public static extern bool ReleaseCapture();
+        [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int val, int size);
+
+        public const int WM_NCLBUTTONDOWN = 0xA1, HTCAPTION = 2;
+        public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;   // Win11：窗口圆角偏好
+
+        // 让无边框窗口可拖动：在任意客户区按下时模拟拖标题栏
+        public static void DragWindow(IntPtr hwnd)
+        {
+            ReleaseCapture();
+            SendMessageW(hwnd, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
+        }
+
+        // Win11 圆角（旧系统自动忽略）
+        public static void RoundCorners(IntPtr hwnd)
+        {
+            try { int v = 2 /*DWMWCP_ROUND*/; DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref v, 4); }
+            catch { }
+        }
 
         public const int WH_KEYBOARD_LL = 13;
         public const int WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104;
@@ -397,7 +417,86 @@ namespace IMEStatsSharp
         }
     }
 
-    // ---------------- 统计面板（单 Form 自绘） ----------------
+    // ---------------- 图标工厂（多分辨率 ICO，托盘/任务栏/Alt-Tab 都清晰） ----------------
+    internal static class IconFactory
+    {
+        // 蓝色渐变圆角方块 + 白色"字"，paused 时转灰
+        public static Bitmap Render(int s, bool paused)
+        {
+            var bmp = new Bitmap(s, s);
+            using var g = Graphics.FromImage(bmp);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+            float m = s * 0.08f, r = s * 0.28f;
+            var rect = new RectangleF(m, m, s - 2 * m, s - 2 * m);
+            using var path = Round(rect, r);
+            Color top = paused ? ColorTranslator.FromHtml("#B7BCC6") : ColorTranslator.FromHtml("#5A7BFF");
+            Color bot = paused ? ColorTranslator.FromHtml("#8A909C") : ColorTranslator.FromHtml("#3344CC");
+            using (var lg = new LinearGradientBrush(rect, top, bot, 90f))
+                g.FillPath(lg, path);
+            // 顶部高光，增加立体感
+            var glo = new RectangleF(m, m, s - 2 * m, (s - 2 * m) * 0.5f);
+            using (var gp = Round(glo, r))
+            using (var lg2 = new LinearGradientBrush(glo, Color.FromArgb(70, 255, 255, 255), Color.FromArgb(0, 255, 255, 255), 90f))
+                g.FillPath(lg2, gp);
+            // "字"
+            using var f = new Font("微软雅黑", s * 0.5f, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            var box = new RectangleF(m, m * 0.6f, s - 2 * m, s - 2 * m);
+            g.DrawString("字", f, Brushes.White, box, sf);
+            return bmp;
+        }
+
+        public static GraphicsPath Round(RectangleF rc, float r)
+        {
+            float d = r * 2;
+            var p = new GraphicsPath();
+            if (d <= 0) { p.AddRectangle(rc); return p; }
+            p.AddArc(rc.X, rc.Y, d, d, 180, 90);
+            p.AddArc(rc.Right - d, rc.Y, d, d, 270, 90);
+            p.AddArc(rc.Right - d, rc.Bottom - d, d, d, 0, 90);
+            p.AddArc(rc.X, rc.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        public static Icon Create(bool paused)
+        {
+            int[] sizes = { 16, 20, 24, 32, 40, 48, 64, 128, 256 };
+            var pngs = new List<byte[]>();
+            foreach (int s in sizes)
+            {
+                using var bmp = Render(s, paused);
+                using var ms0 = new MemoryStream();
+                bmp.Save(ms0, System.Drawing.Imaging.ImageFormat.Png);
+                pngs.Add(ms0.ToArray());
+            }
+            using var ms = new MemoryStream();
+            using (var bw = new BinaryWriter(ms))
+            {
+                bw.Write((short)0); bw.Write((short)1); bw.Write((short)sizes.Length);
+                int offset = 6 + 16 * sizes.Length;
+                for (int i = 0; i < sizes.Length; i++)
+                {
+                    int s = sizes[i];
+                    bw.Write((byte)(s >= 256 ? 0 : s));
+                    bw.Write((byte)(s >= 256 ? 0 : s));
+                    bw.Write((byte)0); bw.Write((byte)0);
+                    bw.Write((short)1); bw.Write((short)32);
+                    bw.Write(pngs[i].Length);
+                    bw.Write(offset);
+                    offset += pngs[i].Length;
+                }
+                foreach (var p in pngs) bw.Write(p);
+                bw.Flush();
+                var bytes = ms.ToArray();
+                using var read = new MemoryStream(bytes);
+                return new Icon(read);
+            }
+        }
+    }
+
+    // ---------------- 统计面板（无边框圆角自绘，Win11 风） ----------------
     internal sealed class PanelForm : Form
     {
         private readonly Store _store;
@@ -411,29 +510,71 @@ namespace IMEStatsSharp
         private List<(string, long, long, long)> _days = new List<(string, long, long, long)>();
         private List<(string, long)> _words = new List<(string, long)>();
 
-        private static readonly Color BG = ColorTranslator.FromHtml("#FAFAFA");
+        private static readonly Color BG = ColorTranslator.FromHtml("#F4F5F7");
         private static readonly Color CARD = Color.White;
-        private static readonly Color FG = ColorTranslator.FromHtml("#3A3A3A");
-        private static readonly Color SUB = ColorTranslator.FromHtml("#9B9B9B");
-        private static readonly Color ACCENT = ColorTranslator.FromHtml("#3347D9");
-        private static readonly Color BAR1 = ColorTranslator.FromHtml("#A9B8D6");
-        private static readonly Color BAR2 = ColorTranslator.FromHtml("#7B8AE0");
-        private static readonly Color BAR3 = ColorTranslator.FromHtml("#E8A87C");
+        private static readonly Color FG = ColorTranslator.FromHtml("#2B2F38");
+        private static readonly Color SUB = ColorTranslator.FromHtml("#9AA0AB");
+        private static readonly Color ACCENT = ColorTranslator.FromHtml("#4F6BFF");
+        private static readonly Color ACCENT2 = ColorTranslator.FromHtml("#3344CC");
+        // 三组柱状渐变（上浅下深）
+        private static readonly Color BAR1A = ColorTranslator.FromHtml("#B7C2EC"), BAR1B = ColorTranslator.FromHtml("#8C9BE2");
+        private static readonly Color BAR2A = ColorTranslator.FromHtml("#7E8CEC"), BAR2B = ColorTranslator.FromHtml("#4F5FD9");
+        private static readonly Color BAR3A = ColorTranslator.FromHtml("#F6B98A"), BAR3B = ColorTranslator.FromHtml("#E8915A");
+
+        private Rectangle _closeRect;
+        private bool _closeHover;
+        private static readonly int PAD = 24;
+        private readonly Image _glyph = IconFactory.Render(30, false);   // 标题栏小图标
 
         public PanelForm(Store s, KeyCounter c, CommitLogReader r)
         {
             _store = s; _counter = c; _reader = r;
             Text = "输入统计";
-            FormBorderStyle = FormBorderStyle.FixedSingle;
+            FormBorderStyle = FormBorderStyle.None;     // 无边框，自绘标题栏
             MaximizeBox = false; TopMost = true;
-            ClientSize = new Size(620, 640);
+            ClientSize = new Size(660, 772);
             BackColor = BG;
             DoubleBuffered = true;
+            KeyPreview = true;
             StartPosition = FormStartPosition.CenterScreen;
+            Icon = IconFactory.Create(false);           // Alt-Tab / 任务栏图标
+
+            _closeRect = new Rectangle(ClientSize.Width - 42, 16, 26, 26);
+
+            // Esc 关闭；点标题区域拖动；右上角 × 关闭
+            KeyDown += (o, e) => { if (e.KeyCode == Keys.Escape) Close(); };
+            MouseMove += (o, e) =>
+            {
+                bool h = _closeRect.Contains(e.Location);
+                if (h != _closeHover) { _closeHover = h; Invalidate(_closeRect); }
+            };
+            MouseDown += (o, e) =>
+            {
+                if (e.Button != MouseButtons.Left) return;
+                if (_closeRect.Contains(e.Location)) { Close(); return; }
+                if (e.Y < 60) Native.DragWindow(Handle);    // 标题区拖动
+            };
+
             _timer.Interval = 1000;
             _timer.Tick += (o, e) => { Refetch(); Invalidate(); };
             _timer.Start();
             Refetch();
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            Native.RoundCorners(Handle);                // Win11 原生圆角 + 阴影
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ClassStyle |= 0x00020000;            // CS_DROPSHADOW：柔和投影
+                return cp;
+            }
         }
 
         private void Refetch()
@@ -452,116 +593,215 @@ namespace IMEStatsSharp
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
-            _timer.Stop(); base.OnFormClosed(e);
+            _timer.Stop();
+            Icon?.Dispose();
+            _glyph?.Dispose();
+            base.OnFormClosed(e);
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            base.OnPaint(e);
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            using var fTitle = new Font("微软雅黑", 12, FontStyle.Bold);
-            using var fBig = new Font("微软雅黑", 18, FontStyle.Bold);
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            using (var bgb = new SolidBrush(BG)) g.FillRectangle(bgb, ClientRectangle);
+
+            using var fTitle = new Font("微软雅黑", 13, FontStyle.Bold);
+            using var fBig = new Font("微软雅黑", 18.5f, FontStyle.Bold);
             using var fSm = new Font("微软雅黑", 9);
-            using var fTiny = new Font("微软雅黑", 7);
+            using var fLbl = new Font("微软雅黑", 9.5f, FontStyle.Bold);
+            using var fTiny = new Font("微软雅黑", 7.5f);
             using var bFg = new SolidBrush(FG);
             using var bSub = new SolidBrush(SUB);
-            using var bCard = new SolidBrush(CARD);
 
-            g.DrawString("输入统计 (C#)", fTitle, bFg, 20, 14);
-            g.DrawString(DateTime.Today.ToString("yyyy-MM-dd"), fSm, bSub, 520, 20);
+            int W = ClientSize.Width;
 
-            // 卡片
+            // ---- 标题栏 ----
+            g.DrawImage(_glyph, PAD, 14, 30, 30);
+            g.DrawString("输入统计", fTitle, bFg, PAD + 40, 17);
+            // 日期胶囊
+            string date = DateTime.Now.ToString("yyyy-MM-dd  HH:mm");
+            float dw = g.MeasureString(date, fSm).Width + 22;
+            var datePill = new RectangleF(_closeRect.X - 12 - dw, 16, dw, 26);
+            using (var p = IconFactory.Round(datePill, 13))
+            using (var b = new SolidBrush(Color.FromArgb(235, 238, 244)))
+                g.FillPath(b, p);
+            g.DrawString(date, fSm, bSub, datePill.X + 11, datePill.Y + 5);
+            DrawClose(g);
+
+            // ---- 指标卡片 ----
             string[] names = { "按键次数", "中文字数", "英文字符", "英文单词" };
+            Color[] dots = { BAR1B, ACCENT, BAR2B, BAR3B };
             long[] todayV = { _today[0] + _live.Item1, _today[1], _today[2] + _live.Item2, _today[3] + _live.Item3 };
             long[] totalV = { _total[0] + _live.Item1, _total[1], _total[2] + _live.Item2, _total[3] + _live.Item3 };
+            int gap = 12, cw = (W - 2 * PAD - 3 * gap) / 4, ch = 92, cy = 64;
             for (int i = 0; i < 4; i++)
             {
-                var rc = new Rectangle(20 + i * 148, 50, 136, 86);
-                g.FillRectangle(bCard, rc);
+                var rc = new Rectangle(PAD + i * (cw + gap), cy, cw, ch);
+                Card(g, rc, 14);
                 using var bV = new SolidBrush(i == 1 ? ACCENT : FG);
-                DrawCentered(g, todayV[i].ToString("N0"), fBig, bV, rc.X, rc.Y + 8, rc.Width);
-                DrawCentered(g, names[i], fSm, bSub, rc.X, rc.Y + 44, rc.Width);
-                DrawCentered(g, "累计 " + totalV[i].ToString("N0"), fTiny, bSub, rc.X, rc.Y + 64, rc.Width);
+                Centered(g, todayV[i].ToString("N0"), fBig, bV, rc.X, rc.Y + 14, rc.Width);
+                // 名称 + 左侧色点
+                float nameW = g.MeasureString(names[i], fSm).Width;
+                float nx = rc.X + (rc.Width - nameW) / 2;
+                using (var bd = new SolidBrush(dots[i]))
+                    g.FillEllipse(bd, nx - 12, rc.Y + 50, 7, 7);
+                g.DrawString(names[i], fSm, bSub, nx, rc.Y + 46);
+                Centered(g, "累计 " + totalV[i].ToString("N0"), fTiny, bSub, rc.X, rc.Y + 68, rc.Width);
             }
 
-            int y = 150;
-            g.DrawString("今日 · 时段分布（按键）", fSm, bSub, 20, y);
-            DrawHours(g, new Rectangle(20, y + 20, 580, 80), fTiny, bSub);
-            y += 114;
-            g.DrawString("最近 14 天 · 按键次数", fSm, bSub, 20, y);
-            DrawDays(g, new Rectangle(20, y + 20, 580, 96), 1, BAR1, fTiny, bSub);
-            y += 130;
-            g.DrawString("最近 14 天 · 中文字数", fSm, bSub, 20, y);
-            DrawDays(g, new Rectangle(20, y + 20, 580, 96), 2, BAR2, fTiny, bSub);
-            y += 130;
-            g.DrawString("常用词 Top 10", fSm, bSub, 20, y);
-            var rcW = new Rectangle(20, y + 20, 580, 56);
-            g.FillRectangle(bCard, rcW);
-            string wtext = _words.Count == 0 ? "还没有数据，去打几个字吧"
-                : string.Join("　", _words.Select((w, i) => $"{i + 1}.{w.Item1} ×{w.Item2}"));
-            using (var fW = new Font("微软雅黑", 9.5f))
-                g.DrawString(wtext, fW, bFg, new RectangleF(rcW.X + 10, rcW.Y + 8, rcW.Width - 20, rcW.Height - 12));
+            int cardW = W - 2 * PAD;
+            int y = cy + ch + 20;
+            y = Section(g, fLbl, "今日 · 时段分布", BAR3B, y, 104, rc => DrawHours(g, rc, fTiny));
+            y = Section(g, fLbl, "最近 14 天 · 按键次数", BAR1B, y, 112, rc => DrawDays(g, rc, 1, BAR1A, BAR1B, fTiny));
+            y = Section(g, fLbl, "最近 14 天 · 中文字数", BAR2B, y, 112, rc => DrawDays(g, rc, 2, BAR2A, BAR2B, fTiny));
+            y = Section(g, fLbl, "常用词 Top 10", ACCENT, y, 104, rc => DrawWords(g, rc));
         }
 
-        private static void DrawCentered(Graphics g, string s, Font f, Brush b, int x, int y, int w)
+        // ---- 标题色块 + 卡片容器，回调里画图表 ----
+        private int Section(Graphics g, Font fLbl, string title, Color dot, int y, int h, Action<Rectangle> draw)
+        {
+            using (var bd = new SolidBrush(dot))
+            using (var p = IconFactory.Round(new RectangleF(PAD, y + 1, 11, 11), 3))
+                g.FillPath(bd, p);
+            using (var bf = new SolidBrush(FG))
+                g.DrawString(title, fLbl, bf, PAD + 18, y - 2);
+            var rc = new Rectangle(PAD, y + 22, ClientSize.Width - 2 * PAD, h);
+            Card(g, rc, 14);
+            draw(rc);
+            return y + 22 + h + 18;
+        }
+
+        // ---- 柔和投影 + 白卡片 + 细边 ----
+        private static void Card(Graphics g, Rectangle rc, int r)
+        {
+            for (int k = 7; k >= 1; k--)
+            {
+                var sr = new RectangleF(rc.X - k, rc.Y - k + 3, rc.Width + 2 * k, rc.Height + 2 * k);
+                using var p = IconFactory.Round(sr, r + k);
+                using var b = new SolidBrush(Color.FromArgb(5, 40, 50, 80));
+                g.FillPath(b, p);
+            }
+            using (var p = IconFactory.Round(rc, r))
+            using (var b = new SolidBrush(CARD)) g.FillPath(b, p);
+            using (var p = IconFactory.Round(rc, r))
+            using (var pen = new Pen(Color.FromArgb(236, 238, 242))) g.DrawPath(pen, p);
+        }
+
+        private void DrawClose(Graphics g)
+        {
+            if (_closeHover)
+                using (var b = new SolidBrush(Color.FromArgb(240, 220, 222)))
+                using (var p = IconFactory.Round(_closeRect, 8)) g.FillPath(b, p);
+            using var pen = new Pen(_closeHover ? ColorTranslator.FromHtml("#C04848") : SUB, 1.6f);
+            var r = _closeRect; int m = 8;
+            g.DrawLine(pen, r.X + m, r.Y + m, r.Right - m, r.Bottom - m);
+            g.DrawLine(pen, r.Right - m, r.Y + m, r.X + m, r.Bottom - m);
+        }
+
+        private static void Centered(Graphics g, string s, Font f, Brush b, int x, int y, int w)
         {
             var sz = g.MeasureString(s, f);
             g.DrawString(s, f, b, x + (w - sz.Width) / 2, y);
         }
 
-        private void DrawHours(Graphics g, Rectangle rc, Font fTiny, Brush bSub)
+        // 圆角顶的渐变柱
+        private static void Bar(Graphics g, RectangleF rc, Color top, Color bot)
         {
-            g.FillRectangle(Brushes.White, rc);
+            if (rc.Height < 0.5f) return;
+            float r = Math.Min(rc.Width / 2f, Math.Min(rc.Height, 5f));
+            float d = r * 2;
+            using var p = new GraphicsPath();
+            p.AddArc(rc.X, rc.Y, d, d, 180, 90);
+            p.AddArc(rc.Right - d, rc.Y, d, d, 270, 90);
+            p.AddLine(rc.Right, rc.Y + r, rc.Right, rc.Bottom);
+            p.AddLine(rc.Right, rc.Bottom, rc.X, rc.Bottom);
+            p.CloseFigure();
+            using var lg = new LinearGradientBrush(
+                new RectangleF(rc.X, rc.Y, rc.Width, Math.Max(rc.Height, 1)), top, bot, 90f);
+            g.FillPath(lg, p);
+        }
+
+        private void DrawHours(Graphics g, Rectangle rc, Font fTiny)
+        {
+            using var bSub = new SolidBrush(SUB);
             long vmax = _hours.Count > 0 ? Math.Max(1, _hours.Values.Max()) : 1;
-            float bw = (rc.Width - 16) / 24f;
-            using var bar = new SolidBrush(BAR3);
+            float bw = (rc.Width - 24) / 24f, baseY = rc.Bottom - 22, top = rc.Y + 14;
             for (int h = 0; h < 24; h++)
             {
                 _hours.TryGetValue(h, out long v);
-                float x0 = rc.X + 8 + h * bw + bw * 0.2f;
-                float wRect = bw * 0.6f;
+                float x0 = rc.X + 12 + h * bw + bw * 0.22f, wRect = bw * 0.56f;
                 if (v > 0)
                 {
-                    float bh = (rc.Height - 26) * v / (float)vmax;
-                    g.FillRectangle(bar, x0, rc.Bottom - 14 - bh, wRect, bh);
+                    float bh = (baseY - top) * v / (float)vmax;
+                    Bar(g, new RectangleF(x0, baseY - bh, wRect, bh), BAR3A, BAR3B);
                 }
                 if (h % 3 == 0)
-                    g.DrawString(h.ToString(), fTiny, bSub, x0 - 2, rc.Bottom - 12);
+                    g.DrawString(h.ToString("D2"), fTiny, bSub, x0 - 4, baseY + 5);
             }
         }
 
-        private void DrawDays(Graphics g, Rectangle rc, int idx, Color color, Font fTiny, Brush bSub)
+        private void DrawDays(Graphics g, Rectangle rc, int idx, Color top, Color bot, Font fTiny)
         {
-            g.FillRectangle(Brushes.White, rc);
+            using var bSub = new SolidBrush(SUB);
             if (_days.Count == 0) return;
             Func<(string, long, long, long), long> sel = d => idx == 1 ? d.Item2 : d.Item3;
+            string today = DateTime.Today.ToString("yyyy-MM-dd");
             long lk = _live.Item1;
+            long Val(int i) => sel(_days[i]) + (idx == 1 && i == _days.Count - 1 && _days[i].Item1 == today ? lk : 0);
             long vmax = 1;
+            for (int i = 0; i < _days.Count; i++) vmax = Math.Max(vmax, Val(i));
+            float bw = (rc.Width - 24) / (float)_days.Count;
+            float baseY = rc.Bottom - 22, top0 = rc.Y + 24;
             for (int i = 0; i < _days.Count; i++)
             {
-                long v = sel(_days[i]);
-                if (idx == 1 && i == _days.Count - 1 &&
-                    _days[i].Item1 == DateTime.Today.ToString("yyyy-MM-dd")) v += lk;
-                vmax = Math.Max(vmax, v);
-            }
-            float bw = (rc.Width - 16) / (float)_days.Count;
-            using var bar = new SolidBrush(color);
-            for (int i = 0; i < _days.Count; i++)
-            {
-                long v = sel(_days[i]);
-                if (idx == 1 && i == _days.Count - 1 &&
-                    _days[i].Item1 == DateTime.Today.ToString("yyyy-MM-dd")) v += lk;
-                float x0 = rc.X + 8 + i * bw + bw * 0.18f;
-                float wRect = bw * 0.64f;
+                long v = Val(i);
+                float x0 = rc.X + 12 + i * bw + bw * 0.16f, wRect = bw * 0.68f;
                 if (v > 0)
                 {
-                    float bh = (rc.Height - 34) * v / (float)vmax;
-                    g.FillRectangle(bar, x0, rc.Bottom - 16 - bh, wRect, bh);
-                    string label = v >= 10000 ? (v / 1000.0).ToString("0.0") + "k" : v.ToString("N0");
-                    g.DrawString(label, fTiny, bSub, x0 - 4, rc.Bottom - 28 - bh);
+                    float bh = (baseY - top0) * v / (float)vmax;
+                    Bar(g, new RectangleF(x0, baseY - bh, wRect, bh), top, bot);
+                    string lab = v >= 10000 ? (v / 1000.0).ToString("0.0") + "k" : v.ToString("N0");
+                    float lw = g.MeasureString(lab, fTiny).Width;
+                    g.DrawString(lab, fTiny, bSub, x0 + wRect / 2 - lw / 2, baseY - bh - 14);
                 }
-                g.DrawString(_days[i].Item1.Substring(5), fTiny, bSub, x0 - 4, rc.Bottom - 13);
+                string md = _days[i].Item1.Substring(5);
+                float mw = g.MeasureString(md, fTiny).Width;
+                g.DrawString(md, fTiny, bSub, x0 + wRect / 2 - mw / 2, baseY + 5);
+            }
+        }
+
+        // 常用词：胶囊标签自动换行
+        private void DrawWords(Graphics g, Rectangle rc)
+        {
+            using var fW = new Font("微软雅黑", 9.5f);
+            using var fR = new Font("微软雅黑", 8.5f, FontStyle.Bold);
+            using var bSub = new SolidBrush(SUB);
+            if (_words.Count == 0)
+            {
+                g.DrawString("还没有数据，去打几个字吧～", fW, bSub, rc.X + 16, rc.Y + 16);
+                return;
+            }
+            float x = rc.X + 14, y = rc.Y + 14, maxX = rc.Right - 14, lh = 30;
+            for (int i = 0; i < _words.Count; i++)
+            {
+                string label = $"{_words[i].Item1}  ×{_words[i].Item2}";
+                float tw = g.MeasureString(label, fW).Width;
+                float rank = 22, pillW = rank + tw + 16;
+                if (x + pillW > maxX) { x = rc.X + 14; y += lh; }
+                if (y + 24 > rc.Bottom) break;
+                var pill = new RectangleF(x, y, pillW, 24);
+                using (var p = IconFactory.Round(pill, 12))
+                using (var b = new SolidBrush(Color.FromArgb(242, 244, 250))) g.FillPath(b, p);
+                // 序号圆点
+                using (var b = new SolidBrush(i < 3 ? ACCENT : Color.FromArgb(190, 196, 208)))
+                    g.FillEllipse(b, x + 4, y + 4, 16, 16);
+                string rk = (i + 1).ToString();
+                float rkw = g.MeasureString(rk, fR).Width;
+                g.DrawString(rk, fR, Brushes.White, x + 4 + (16 - rkw) / 2, y + 5);
+                using (var bf = new SolidBrush(FG))
+                    g.DrawString(label, fW, bf, x + rank + 2, y + 4);
+                x += pillW + 8;
             }
         }
     }
@@ -671,7 +911,7 @@ namespace IMEStatsSharp
             // 托盘
             _tray = new NotifyIcon
             {
-                Icon = MakeIcon(false),
+                Icon = IconFactory.Create(false),
                 Text = "输入统计 (C#)",
                 Visible = true,
                 ContextMenuStrip = new ContextMenuStrip()
@@ -684,7 +924,7 @@ namespace IMEStatsSharp
                 _counter.Paused = !_counter.Paused;
                 pause.Checked = _counter.Paused;
                 var old = _tray.Icon;
-                _tray.Icon = MakeIcon(_counter.Paused);
+                _tray.Icon = IconFactory.Create(_counter.Paused);
                 old?.Dispose();         // 释放被换下的图标句柄
             };
             _tray.ContextMenuStrip.Items.Add(pause);
@@ -706,27 +946,6 @@ namespace IMEStatsSharp
             if (_panel != null && !_panel.IsDisposed) { _panel.Activate(); return; }
             _panel = new PanelForm(_store, _counter, _reader);
             _panel.Show();
-        }
-
-        private static Icon MakeIcon(bool paused)
-        {
-            using var bmp = new Bitmap(32, 32);
-            using (var g = Graphics.FromImage(bmp))
-            {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                using var b = new SolidBrush(paused ? Color.Gray : Color.DodgerBlue);
-                g.FillRectangle(b, 2, 2, 28, 28);
-                using var f = new Font("微软雅黑", 16, FontStyle.Bold);
-                g.DrawString("字", f, Brushes.White, 2, 2);
-            }
-            // GetHicon 的句柄 GDI 不会自动回收：Clone 出托管副本后立即 DestroyIcon
-            IntPtr h = bmp.GetHicon();
-            try
-            {
-                using var tmp = Icon.FromHandle(h);
-                return (Icon)tmp.Clone();
-            }
-            finally { Native.DestroyIcon(h); }
         }
 
         // 读 stats-app\config.json（与 Python 版同一份）：skip_processes / flush_interval_sec
