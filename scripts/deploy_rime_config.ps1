@@ -1,4 +1,4 @@
-# 部署本项目的 Rime 配置到用户目录 %APPDATA%\Rime
+﻿# 部署本项目的 Rime 配置到用户目录 %APPDATA%\Rime
 # 用法：右键“使用 PowerShell 运行”，或在终端执行 .\deploy_rime_config.ps1
 $ErrorActionPreference = "Stop"
 

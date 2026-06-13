@@ -1,4 +1,4 @@
-# 把 C# 版统计程序安装到稳定位置 %LOCALAPPDATA%\IMEStats，与源码仓库解耦
+﻿# 把 C# 版统计程序安装到稳定位置 %LOCALAPPDATA%\IMEStats，与源码仓库解耦
 # ——这样以后移动/重命名/删除本仓库，自启与程序都不受影响（数据本就在 %APPDATA%\IMEStats）
 # 用法：右键“使用 PowerShell 运行”，或在终端执行 .\install.ps1
 $ErrorActionPreference = "Stop"

@@ -1,3 +1,15 @@
-# 雾凇拼音方案补丁：挂载上屏日志记录器
+# 雾凇拼音方案补丁：挂载上屏日志记录器 + 前后鼻音模糊
 patch:
   "engine/processors/@before 0": lua_processor@commit_logger
+
+  # 前后鼻音不分兼容（雾凇内置规则，这里开启）：
+  # 输 qin 也能出 qing、shenme/shengme 互通等。双向，6 条只覆盖 an/ang、en/eng、in/ing。
+  # /+ 追加到雾凇自带 algebra 之后，不动原有拼写规则。
+  # 副作用：候选里同音词会变多一点（精度略降），这是模糊音的固有代价；不想要就删掉这块重新部署。
+  "speller/algebra/+":
+    - derive/ang$/an/
+    - derive/an$/ang/
+    - derive/eng$/en/
+    - derive/en$/eng/
+    - derive/ing$/in/
+    - derive/in$/ing/

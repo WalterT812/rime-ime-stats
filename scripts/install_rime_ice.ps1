@@ -1,4 +1,4 @@
-# 安装/更新雾凇拼音（rime-ice）词库与方案到 %APPDATA%\Rime
+﻿# 安装/更新雾凇拼音（rime-ice）词库与方案到 %APPDATA%\Rime
 # 雾凇拼音是目前公认体验最接近商业输入法的开源 Rime 方案
 # 项目主页：https://github.com/iDvel/rime-ice
 # 安装完成后自动触发小狼毫重新部署，可直接用于定时更新词库
