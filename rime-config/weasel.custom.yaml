@@ -52,19 +52,32 @@ patch:
   app_options:
     # --- 常见竞技/网游 ---
     cs2.exe: { ascii_mode: true }
+    csgo.exe: { ascii_mode: true }
     valorant.exe: { ascii_mode: true }
     valorant-win64-shipping.exe: { ascii_mode: true }
     "league of legends.exe": { ascii_mode: true, inline_preedit: false }
     crossfire.exe: { ascii_mode: true }
     dota2.exe: { ascii_mode: true }
     r5apex.exe: { ascii_mode: true }            # Apex
+    overwatch.exe: { ascii_mode: true }         # 守望先锋
+    tslgame.exe: { ascii_mode: true }           # PUBG 绝地求生
+    deltaforceclient-win64-shipping.exe: { ascii_mode: true }   # 三角洲行动
+    marvelrivals_launcher.exe: { ascii_mode: true }
+    marvel-rivals-win64-shipping.exe: { ascii_mode: true }      # 漫威争锋
+    naraka.exe: { ascii_mode: true }            # 永劫无间
     # --- 米哈游系 ---
     yuanshen.exe: { ascii_mode: true, inline_preedit: false }   # 原神
+    genshinimpact.exe: { ascii_mode: true, inline_preedit: false }  # 原神(国际服)
     starrail.exe: { ascii_mode: true, inline_preedit: false }   # 星穹铁道
-    zenlesszonezero.exe: { ascii_mode: true, inline_preedit: false }
+    zenlesszonezero.exe: { ascii_mode: true, inline_preedit: false }  # 绝区零
+    bh3.exe: { ascii_mode: true, inline_preedit: false }        # 崩坏3
     # --- 其他 ---
-    wuthering waves.exe: { ascii_mode: true, inline_preedit: false }
-    eldenring.exe: { ascii_mode: true }
+    wuthering waves.exe: { ascii_mode: true, inline_preedit: false }  # 鸣潮
+    client-win64-shipping.exe: { ascii_mode: true, inline_preedit: false }  # 鸣潮(部分版本进程名)
+    eldenring.exe: { ascii_mode: true }         # 艾尔登法环
+    nightreign.exe: { ascii_mode: true }        # 艾尔登法环：黑夜君临
+    gta5.exe: { ascii_mode: true }
+    bf2042.exe: { ascii_mode: true }            # 战地2042
     # 终端/IDE 默认英文（可按需删除）
     windowsterminal.exe: { ascii_mode: true }
     openconsole.exe: { ascii_mode: true }

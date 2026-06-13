@@ -24,3 +24,8 @@ patch:
   # 方案切换菜单快捷键
   switcher/hotkeys:
     - "Control+grave"      # Ctrl+`
+
+  # 分号选第 2 候选：; 不是拼音键，候选菜单弹出时按 ; 直接上第二个词，打字更快；
+  # 没弹菜单时照常输入分号。/+ 是“追加到现有绑定”，不影响雾凇自带的翻页等键位。
+  "key_binder/bindings/+":
+    - { when: has_menu, accept: semicolon, send: 2 }
