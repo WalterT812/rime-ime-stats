@@ -675,17 +675,18 @@ namespace IMEStatsSharp
         // ---- 柔和投影 + 白卡片 + 细边 ----
         private static void Card(Graphics g, Rectangle rc, int r)
         {
-            for (int k = 7; k >= 1; k--)
+            // 向下偏移的柔和投影（多层低透明度叠加，营造"悬浮"感）
+            for (int k = 9; k >= 1; k--)
             {
-                var sr = new RectangleF(rc.X - k, rc.Y - k + 3, rc.Width + 2 * k, rc.Height + 2 * k);
+                var sr = new RectangleF(rc.X - k + 0.5f, rc.Y - k + 6, rc.Width + 2 * k - 1, rc.Height + 2 * k);
                 using var p = IconFactory.Round(sr, r + k);
-                using var b = new SolidBrush(Color.FromArgb(5, 40, 50, 80));
+                using var b = new SolidBrush(Color.FromArgb(7, 38, 50, 90));
                 g.FillPath(b, p);
             }
             using (var p = IconFactory.Round(rc, r))
             using (var b = new SolidBrush(CARD)) g.FillPath(b, p);
             using (var p = IconFactory.Round(rc, r))
-            using (var pen = new Pen(Color.FromArgb(236, 238, 242))) g.DrawPath(pen, p);
+            using (var pen = new Pen(Color.FromArgb(232, 235, 240))) g.DrawPath(pen, p);
         }
 
         private void DrawClose(Graphics g)
@@ -842,13 +843,40 @@ namespace IMEStatsSharp
             catch { }
         }
 
+        // 离屏渲染面板为 PNG（开发自检用，不影响正式运行）
+        private static void RenderPreview(string outPath)
+        {
+            try
+            {
+                ApplicationConfiguration.Initialize();
+                EnsureDatabase();
+                using var store = new Store(DbPath);
+                var counter = new KeyCounter(store, new HashSet<string>());   // 不 Start，不装钩子
+                var reader = new CommitLogReader(store);
+                using var f = new PanelForm(store, counter, reader);
+                f.CreateControl();                          // 强制建句柄以便绘制
+                using var bmp = new Bitmap(f.Width, f.Height);
+                f.DrawToBitmap(bmp, new Rectangle(0, 0, f.Width, f.Height));
+                bmp.Save(outPath, System.Drawing.Imaging.ImageFormat.Png);
+            }
+            catch (Exception ex) { Log("RenderPreview", ex); }
+        }
+
         [STAThread]
-        private static void Main()
+        private static void Main(string[] args)
         {
             AppDomain.CurrentDomain.UnhandledException += (s, e) =>
                 Log("UnhandledException", e.ExceptionObject as Exception ?? new Exception("非异常对象: " + e.ExceptionObject));
             Application.ThreadException += (s, e) => Log("ThreadException", e.Exception);
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+
+            // 开发自检：把面板离屏渲染成 PNG 后退出（不计数、不抢互斥锁）
+            // 用法：IMEStatsSharp.exe --render-preview <输出png路径>
+            if (args.Length >= 2 && args[0] == "--render-preview")
+            {
+                RenderPreview(args[1]);
+                return;
+            }
 
             using var mutex = new Mutex(false, "IMEStats_SingleInstance_Mutex", out bool createdNew);
             if (!createdNew)                // 已有实例（含 Python 版）在跑
