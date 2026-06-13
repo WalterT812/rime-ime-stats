@@ -24,7 +24,8 @@ import sqlite3
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = (os.path.dirname(sys.executable) if FROZEN
            else os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = os.path.join(APP_DIR, "stats.db")
+DATA_DIR = os.path.join(os.environ.get("APPDATA", APP_DIR), "IMEStats")
+DB_PATH = os.path.join(DATA_DIR, "stats.db")
 RIME_USER_DIR = os.path.join(os.environ.get("APPDATA", ""), "Rime")
 COMMIT_LOG = os.path.join(RIME_USER_DIR, "commit_log.txt")
 PHRASE_PATH = os.path.join(RIME_USER_DIR, "custom_phrase.txt")
@@ -110,12 +111,35 @@ def update_custom_phrase(top):
         f.write("\n".join(lines) + "\n")
 
 
+def migrate_db():
+    """与 ime_stats.py 一致：首次把旧库迁移到 %APPDATA%\\IMEStats"""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        if os.path.exists(DB_PATH):
+            return
+        import shutil
+        for cand in (os.path.join(APP_DIR, "stats.db"),
+                     os.path.join(APP_DIR, "..", "stats-app", "stats.db")):
+            if os.path.exists(cand):
+                try:
+                    c = sqlite3.connect(cand)
+                    c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    c.close()
+                except Exception:
+                    pass
+                shutil.copy(cand, DB_PATH)
+                break
+    except Exception:
+        pass
+
+
 def main():
     try:
         import jieba
         jieba.setLogLevel(60)
     except ImportError:
         return                          # 没装 jieba 就什么都不做
+    migrate_db()
     conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""CREATE TABLE IF NOT EXISTS word_freq(

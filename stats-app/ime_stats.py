@@ -38,7 +38,8 @@ import tkinter as tk
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = (os.path.dirname(sys.executable) if FROZEN
            else os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = os.path.join(APP_DIR, "stats.db")
+DATA_DIR = os.path.join(os.environ.get("APPDATA", APP_DIR), "IMEStats")
+DB_PATH = os.path.join(DATA_DIR, "stats.db")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 WORD_WORKER = os.path.join(APP_DIR, "word_worker.py")
 REPORTS_DIR = os.path.join(os.path.dirname(APP_DIR), "docs", "reports")
@@ -691,6 +692,29 @@ class App:
         self.root.mainloop()
 
 
+def migrate_db():
+    """首次运行：把旧的 stats-app\\stats.db 迁移到统一位置 %APPDATA%\\IMEStats，
+    让 C# 版与 Python 版共用同一份历史数据。"""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        if os.path.exists(DB_PATH):
+            return
+        import shutil
+        for cand in (os.path.join(APP_DIR, "stats.db"),
+                     os.path.join(APP_DIR, "..", "stats-app", "stats.db")):
+            if os.path.exists(cand):
+                try:
+                    c = sqlite3.connect(cand)
+                    c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    c.close()
+                except Exception:
+                    pass
+                shutil.copy(cand, DB_PATH)
+                break
+    except Exception:
+        pass
+
+
 def ensure_single_instance():
     """互斥锁防双开（双开会导致两份钩子重复计数）"""
     kernel32 = ctypes.windll.kernel32
@@ -705,5 +729,6 @@ if __name__ == "__main__":
         word_worker.main()
         sys.exit(0)
     ensure_single_instance()
+    migrate_db()
     App().run()
 # v0.9

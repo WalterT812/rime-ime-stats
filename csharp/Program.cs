@@ -527,7 +527,10 @@ namespace IMEStatsSharp
     internal static class Program
     {
         public static readonly string AppDir = AppContext.BaseDirectory.TrimEnd('\\');
-        public static readonly string DbPath = Path.Combine(AppDir, "stats.db");
+        // 数据库固定在 %APPDATA%\IMEStats\stats.db（与 exe 位置无关，C#/Python 共用）
+        public static readonly string DataDir =
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "IMEStats");
+        public static readonly string DbPath = Path.Combine(DataDir, "stats.db");
         public static readonly string RimeDir =
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Rime");
         public static readonly string CommitLog = Path.Combine(RimeDir, "commit_log.txt");
@@ -545,10 +548,18 @@ namespace IMEStatsSharp
         private static void Main()
         {
             using var mutex = new Mutex(false, "IMEStats_SingleInstance_Mutex", out bool createdNew);
-            if (!createdNew) return;        // 已有实例（含 Python 版）在跑
+            if (!createdNew)                // 已有实例（含 Python 版）在跑
+            {
+                MessageBox.Show(
+                    "输入统计已经在运行了。\n\n很可能是另一个版本（Python 版）还在任务栏托盘里。\n" +
+                    "两个版本共用同一份数据，不能同时开。\n请先右键那个托盘图标 → 退出，再启动本程序。",
+                    "IME Stats（C# 版）", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
 
             ApplicationConfiguration.Initialize();
 
+            EnsureDatabase();           // 首次运行迁移旧数据库到统一位置
             _store = new Store(DbPath);
             var skip = new HashSet<string>();   // 如需对某些进程跳过计数，写在这里（小写 exe 名）
             _counter = new KeyCounter(_store, skip);
@@ -604,6 +615,8 @@ namespace IMEStatsSharp
                 Application.Exit();
             });
             _tray.MouseClick += (o, e) => { if (e.Button == MouseButtons.Left) ShowPanel(); };
+            _tray.DoubleClick += (o, e) => ShowPanel();
+            ShowPanel();    // 启动即弹一次面板
 
             Application.Run();
         }
@@ -629,13 +642,48 @@ namespace IMEStatsSharp
             return Icon.FromHandle(bmp.GetHicon());
         }
 
+        // 首次运行：把旧的 stats-app\stats.db 迁移到统一位置 %APPDATA%\IMEStats
+        private static void EnsureDatabase()
+        {
+            try
+            {
+                Directory.CreateDirectory(DataDir);
+                if (File.Exists(DbPath)) return;
+                string[] cands = {
+                    Path.Combine(AppDir, "stats.db"),
+                    Path.Combine(AppDir, "..", "stats-app", "stats.db"),
+                    Path.Combine(AppDir, "stats-app", "stats.db"),
+                };
+                foreach (var c in cands)
+                {
+                    if (!File.Exists(c)) continue;
+                    try
+                    {
+                        using var cc = new SqliteConnection("Data Source=" + c);
+                        cc.Open();
+                        using var cmd = cc.CreateCommand();
+                        cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE)";
+                        cmd.ExecuteNonQuery();
+                    }
+                    catch { }
+                    File.Copy(c, DbPath, true);
+                    break;
+                }
+            }
+            catch { }
+        }
+
         // 分词 worker：优先打包版 IMEStats.exe --word-worker，其次 pythonw word_worker.py
         private static void RunWordWorker()
         {
             try
             {
                 string exe = Path.Combine(AppDir, "IMEStats.exe");
-                string py = Path.Combine(AppDir, "word_worker.py");
+                string py = new[] {
+                    Path.Combine(AppDir, "word_worker.py"),
+                    Path.Combine(AppDir, "..", "stats-app", "word_worker.py"),
+                    Path.Combine(AppDir, "stats-app", "word_worker.py"),
+                }.FirstOrDefault(File.Exists) ?? Path.Combine(AppDir, "word_worker.py");
                 var psi = new ProcessStartInfo { CreateNoWindow = true, UseShellExecute = false };
                 if (File.Exists(exe)) { psi.FileName = exe; psi.Arguments = "--word-worker"; }
                 else if (File.Exists(py)) { psi.FileName = "pythonw"; psi.Arguments = "\"" + py + "\""; }

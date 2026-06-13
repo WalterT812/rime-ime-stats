@@ -1,4 +1,15 @@
-vendor/
-stats-app/stats.db
+# Python
 stats-app/__pycache__/
+stats-app/config.json
+# 运行时数据库（已迁移到 %APPDATA%\IMEStats）
+stats-app/stats.db
+stats-app/stats.db-shm
+stats-app/stats.db-wal
+# 打包 / 编译产物
+stats-app/IMEStats.exe
+stats-app/IMEStatsSharp.exe
+csharp/bin/
+csharp/obj/
+csharp/publish/
+# git 自身的 bundle 备份（它本身就是仓库镜像，不纳入版本控制）
 *.bundle
