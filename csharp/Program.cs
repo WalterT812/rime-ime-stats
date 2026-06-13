@@ -547,8 +547,8 @@ namespace IMEStatsSharp
         private static readonly Color BAR2A = ColorTranslator.FromHtml("#7E8CEC"), BAR2B = ColorTranslator.FromHtml("#4F5FD9");
         private static readonly Color BAR3A = ColorTranslator.FromHtml("#F6B98A"), BAR3B = ColorTranslator.FromHtml("#E8915A");
 
-        private Rectangle _closeRect, _minRect;
-        private bool _closeHover, _minHover;
+        private Rectangle _closeRect, _minRect, _pinRect;
+        private bool _closeHover, _minHover, _pinHover;
         private static readonly int PAD = 24;
         private readonly Image _glyph = IconFactory.Render(30, false);   // 标题栏小图标
 
@@ -573,15 +573,18 @@ namespace IMEStatsSharp
             KeyDown += (o, e) => { if (e.KeyCode == Keys.Escape) Close(); };
             MouseMove += (o, e) =>
             {
-                bool ch = _closeRect.Contains(e.Location), mh = _minRect.Contains(e.Location);
-                if (ch != _closeHover || mh != _minHover) { _closeHover = ch; _minHover = mh; Invalidate(); }
+                bool ch = _closeRect.Contains(e.Location), mh = _minRect.Contains(e.Location),
+                     ph = _pinRect.Contains(e.Location);
+                if (ch != _closeHover || mh != _minHover || ph != _pinHover)
+                { _closeHover = ch; _minHover = mh; _pinHover = ph; Invalidate(); }
             };
             MouseDown += (o, e) =>
             {
                 if (e.Button != MouseButtons.Left) return;
                 if (_closeRect.Contains(e.Location)) { Close(); return; }
                 if (_minRect.Contains(e.Location)) { WindowState = FormWindowState.Minimized; return; }
-                // 标题区拖动（避开 6px 缩放边缘和两个按钮）
+                if (_pinRect.Contains(e.Location)) { TopMost = !TopMost; Invalidate(); return; }  // 置顶开关
+                // 标题区拖动（避开 6px 缩放边缘和三个按钮）
                 if (e.Y > 6 && e.Y < 60 && e.X > 6 && e.X < ClientSize.Width - 6)
                     Native.DragWindow(Handle);
             };
@@ -604,6 +607,7 @@ namespace IMEStatsSharp
             int w = ClientSize.Width;
             _closeRect = new Rectangle(w - 42, 14, 28, 28);
             _minRect = new Rectangle(w - 76, 14, 28, 28);
+            _pinRect = new Rectangle(w - 110, 14, 28, 28);
         }
 
         protected override void OnResize(EventArgs e)
@@ -691,7 +695,7 @@ namespace IMEStatsSharp
             // 日期胶囊
             string date = DateTime.Now.ToString("yyyy-MM-dd  HH:mm");
             float dw = g.MeasureString(date, fSm).Width + 22;
-            var datePill = new RectangleF(_minRect.X - 12 - dw, 16, dw, 26);   // 让位给最小化键
+            var datePill = new RectangleF(_pinRect.X - 12 - dw, 16, dw, 26);   // 让位给置顶/最小化/关闭三键
             using (var p = IconFactory.Round(datePill, 13))
             using (var b = new SolidBrush(Color.FromArgb(235, 238, 244)))
                 g.FillPath(b, p);
@@ -760,6 +764,8 @@ namespace IMEStatsSharp
 
         private void DrawButtons(Graphics g)
         {
+            // 置顶大头针：钉住=蓝色实心竖立，取消=灰色斜放空心
+            DrawPin(g, _pinRect, TopMost, _pinHover);
             // 最小化键：一条横线
             if (_minHover)
                 using (var b = new SolidBrush(Color.FromArgb(232, 234, 240)))
@@ -778,6 +784,37 @@ namespace IMEStatsSharp
                 var r = _closeRect; int m = 9;
                 g.DrawLine(pen, r.X + m, r.Y + m, r.Right - m, r.Bottom - m);
                 g.DrawLine(pen, r.Right - m, r.Y + m, r.X + m, r.Bottom - m);
+            }
+        }
+
+        // 大头针图标：active=置顶（竖立实心蓝），否则（斜放空心灰）
+        private void DrawPin(Graphics g, Rectangle rect, bool active, bool hover)
+        {
+            if (hover)
+                using (var b = new SolidBrush(Color.FromArgb(232, 234, 240)))
+                using (var p = IconFactory.Round(rect, 8)) g.FillPath(b, p);
+
+            using var path = new GraphicsPath();
+            using (var cap = IconFactory.Round(new RectangleF(-5, -7, 10, 4), 1.6f))
+                path.AddPath(cap, false);                       // 针帽（按压的平头）
+            path.AddPolygon(new[] {                              // 针身 + 针尖
+                new PointF(-1.7f, -3), new PointF(1.7f, -3),
+                new PointF(1.7f, 2),  new PointF(0, 6), new PointF(-1.7f, 2) });
+
+            using var m = new Matrix();
+            m.Translate(rect.X + rect.Width / 2f, rect.Y + rect.Height / 2f - 1);
+            if (!active) m.Rotate(40);                           // 取消置顶：斜放
+            path.Transform(m);
+
+            if (active)
+            {
+                using var b = new SolidBrush(ACCENT);
+                g.FillPath(b, path);
+            }
+            else
+            {
+                using var pen = new Pen(SUB, 1.5f);
+                g.DrawPath(pen, path);
             }
         }
 
