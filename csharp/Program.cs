@@ -547,8 +547,8 @@ namespace IMEStatsSharp
         private static readonly Color BAR2A = ColorTranslator.FromHtml("#7E8CEC"), BAR2B = ColorTranslator.FromHtml("#4F5FD9");
         private static readonly Color BAR3A = ColorTranslator.FromHtml("#F6B98A"), BAR3B = ColorTranslator.FromHtml("#E8915A");
 
-        private Rectangle _closeRect;
-        private bool _closeHover;
+        private Rectangle _closeRect, _minRect;
+        private bool _closeHover, _minHover;
         private static readonly int PAD = 24;
         private readonly Image _glyph = IconFactory.Render(30, false);   // 标题栏小图标
 
@@ -559,26 +559,31 @@ namespace IMEStatsSharp
             FormBorderStyle = FormBorderStyle.None;     // 无边框，自绘标题栏
             MaximizeBox = false; TopMost = true;
             ClientSize = new Size(660, 772);
+            MinimumSize = new Size(660, 772);   // 可放大，不会缩到内容被裁
+            ResizeRedraw = true;                // 拉伸时整窗重绘，避免残影
             BackColor = BG;
             DoubleBuffered = true;
             KeyPreview = true;
             StartPosition = FormStartPosition.CenterScreen;
             Icon = IconFactory.Create(false);           // Alt-Tab / 任务栏图标
 
-            _closeRect = new Rectangle(ClientSize.Width - 42, 16, 26, 26);
+            LayoutButtons();
 
-            // Esc 关闭；点标题区域拖动；右上角 × 关闭
+            // Esc 关闭；标题区拖动；右上角 最小化 / × 关闭
             KeyDown += (o, e) => { if (e.KeyCode == Keys.Escape) Close(); };
             MouseMove += (o, e) =>
             {
-                bool h = _closeRect.Contains(e.Location);
-                if (h != _closeHover) { _closeHover = h; Invalidate(_closeRect); }
+                bool ch = _closeRect.Contains(e.Location), mh = _minRect.Contains(e.Location);
+                if (ch != _closeHover || mh != _minHover) { _closeHover = ch; _minHover = mh; Invalidate(); }
             };
             MouseDown += (o, e) =>
             {
                 if (e.Button != MouseButtons.Left) return;
                 if (_closeRect.Contains(e.Location)) { Close(); return; }
-                if (e.Y < 60) Native.DragWindow(Handle);    // 标题区拖动
+                if (_minRect.Contains(e.Location)) { WindowState = FormWindowState.Minimized; return; }
+                // 标题区拖动（避开 6px 缩放边缘和两个按钮）
+                if (e.Y > 6 && e.Y < 60 && e.X > 6 && e.X < ClientSize.Width - 6)
+                    Native.DragWindow(Handle);
             };
 
             _timer.Interval = 1000;
@@ -591,6 +596,44 @@ namespace IMEStatsSharp
         {
             base.OnHandleCreated(e);
             Native.RoundCorners(Handle);                // Win11 原生圆角 + 阴影
+        }
+
+        // 右上角按钮位置随宽度变化
+        private void LayoutButtons()
+        {
+            int w = ClientSize.Width;
+            _closeRect = new Rectangle(w - 42, 14, 28, 28);
+            _minRect = new Rectangle(w - 76, 14, 28, 28);
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            LayoutButtons();
+            Invalidate();
+        }
+
+        // 无边框窗口的边缘缩放：命中边/角时返回对应 HT 码，交给系统拖拽
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_NCHITTEST = 0x0084, HTCLIENT = 1;
+            if (m.Msg == WM_NCHITTEST)
+            {
+                base.WndProc(ref m);
+                if ((int)m.Result == HTCLIENT)
+                {
+                    int lp = m.LParam.ToInt32();
+                    var p = PointToClient(new Point((short)(lp & 0xFFFF), (short)(lp >> 16)));
+                    int g = 6, w = ClientSize.Width, h = ClientSize.Height;
+                    bool L = p.X <= g, R = p.X >= w - g, T = p.Y <= g, B = p.Y >= h - g;
+                    int code =
+                        T && L ? 13 : T && R ? 14 : B && L ? 16 : B && R ? 17 :
+                        L ? 10 : R ? 11 : T ? 12 : B ? 15 : HTCLIENT;   // HTLEFT/RIGHT/TOP/BOTTOM/角
+                    m.Result = (IntPtr)code;
+                }
+                return;
+            }
+            base.WndProc(ref m);
         }
 
         protected override CreateParams CreateParams
@@ -648,12 +691,12 @@ namespace IMEStatsSharp
             // 日期胶囊
             string date = DateTime.Now.ToString("yyyy-MM-dd  HH:mm");
             float dw = g.MeasureString(date, fSm).Width + 22;
-            var datePill = new RectangleF(_closeRect.X - 12 - dw, 16, dw, 26);
+            var datePill = new RectangleF(_minRect.X - 12 - dw, 16, dw, 26);   // 让位给最小化键
             using (var p = IconFactory.Round(datePill, 13))
             using (var b = new SolidBrush(Color.FromArgb(235, 238, 244)))
                 g.FillPath(b, p);
             g.DrawString(date, fSm, bSub, datePill.X + 11, datePill.Y + 5);
-            DrawClose(g);
+            DrawButtons(g);
 
             // ---- 指标卡片 ----
             string[] names = { "按键次数", "中文字数", "英文字符", "英文单词" };
@@ -715,15 +758,27 @@ namespace IMEStatsSharp
             using (var pen = new Pen(Color.FromArgb(232, 235, 240))) g.DrawPath(pen, p);
         }
 
-        private void DrawClose(Graphics g)
+        private void DrawButtons(Graphics g)
         {
+            // 最小化键：一条横线
+            if (_minHover)
+                using (var b = new SolidBrush(Color.FromArgb(232, 234, 240)))
+                using (var p = IconFactory.Round(_minRect, 8)) g.FillPath(b, p);
+            using (var pen = new Pen(_minHover ? FG : SUB, 1.6f))
+            {
+                int cy = _minRect.Y + _minRect.Height / 2;
+                g.DrawLine(pen, _minRect.X + 8, cy, _minRect.Right - 8, cy);
+            }
+            // 关闭键：×
             if (_closeHover)
                 using (var b = new SolidBrush(Color.FromArgb(240, 220, 222)))
                 using (var p = IconFactory.Round(_closeRect, 8)) g.FillPath(b, p);
-            using var pen = new Pen(_closeHover ? ColorTranslator.FromHtml("#C04848") : SUB, 1.6f);
-            var r = _closeRect; int m = 8;
-            g.DrawLine(pen, r.X + m, r.Y + m, r.Right - m, r.Bottom - m);
-            g.DrawLine(pen, r.Right - m, r.Y + m, r.X + m, r.Bottom - m);
+            using (var pen = new Pen(_closeHover ? ColorTranslator.FromHtml("#C04848") : SUB, 1.6f))
+            {
+                var r = _closeRect; int m = 9;
+                g.DrawLine(pen, r.X + m, r.Y + m, r.Right - m, r.Bottom - m);
+                g.DrawLine(pen, r.Right - m, r.Y + m, r.X + m, r.Bottom - m);
+            }
         }
 
         private static void Centered(Graphics g, string s, Font f, Brush b, int x, int y, int w)
